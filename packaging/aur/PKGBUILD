@@ -14,7 +14,7 @@ optdepends=(
 )
 options=(!debug)
 source=("$pkgname-$pkgver.tar.gz::https://github.com/dante-ferr/walltag/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
+sha256sums=('1cee00229337bf79a7f88dd4629c0b7f34b1fb436e54e4c72fba8bc87e0dc527')
 
 build() {
   cd "$pkgname-$pkgver"
