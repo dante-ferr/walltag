@@ -17,6 +17,7 @@ impl WallpaperBackend for SwwwBackend {
         let image = image
             .canonicalize()
             .with_context(|| format!("resolve wallpaper path {}", image.display()))?;
+        super::daemon::ensure_running("swww-daemon", "swww")?;
         let status = host_command("swww")
             .args(build_args(&image, options))
             .status()

@@ -1,4 +1,5 @@
 mod awww;
+mod daemon;
 mod swww;
 mod traits;
 

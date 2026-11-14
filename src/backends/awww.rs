@@ -17,6 +17,7 @@ impl WallpaperBackend for AwwwBackend {
         let image = image
             .canonicalize()
             .with_context(|| format!("resolve wallpaper path {}", image.display()))?;
+        super::daemon::ensure_running("awww-daemon", "awww")?;
         // awww uses a subcommand layout that may vary by distro; this matches common installs.
         let status = host_command("awww")
             .args(build_args(&image, options))

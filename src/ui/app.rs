@@ -42,7 +42,6 @@ pub fn launch(config: AppConfig) -> Result<()> {
     }
 
     let app = Application::builder().application_id(APP_ID).build();
-    gtk4::Window::set_default_icon_name(APP_ID);
 
     let config = Rc::new(RefCell::new(config));
     app.connect_activate(move |app| {
@@ -56,6 +55,7 @@ pub fn launch(config: AppConfig) -> Result<()> {
 }
 
 fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
+    gtk4::Window::set_default_icon_name(APP_ID);
     install_embedded_css(app);
 
     {
