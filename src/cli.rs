@@ -14,6 +14,10 @@ pub struct Cli {
     #[arg(long)]
     pub restore: bool,
 
+    /// Skip `post_command` after setting or restoring a wallpaper.
+    #[arg(long)]
+    pub no_post_command: bool,
+
     /// Override the wallpaper root for this run.
     #[arg(long)]
     pub wallpaper_root: Option<PathBuf>,
@@ -37,11 +41,11 @@ impl Cli {
             );
         }
 
-        restore_wallpaper(
-            config.backend,
-            &state.last_image,
-            &ApplyOptions::from_config(&config),
-        )?;
+        let mut options = ApplyOptions::from_config(&config);
+        if self.no_post_command {
+            options = options.without_post_command();
+        }
+        restore_wallpaper(config.backend, &state.last_image, &options)?;
         tracing::info!(
             "Restored wallpaper via {}: {}",
             config.backend.as_str(),

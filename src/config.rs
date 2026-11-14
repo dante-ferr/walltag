@@ -133,6 +133,10 @@ pub struct AppConfig {
     pub awww: AwwwOptions,
     #[serde(default)]
     pub custom_css: Option<PathBuf>,
+    /// Shell command run after a successful wallpaper set. Supports `$wallpaper`
+    /// and `$monitor` (empty when the wallpaper applies to all monitors).
+    #[serde(default)]
+    pub post_command: String,
     /// Sidebar width in logical pixels, set by dragging the divider.
     #[serde(default = "default_sidebar_width")]
     pub sidebar_width: i32,
@@ -320,6 +324,7 @@ impl Default for AppConfig {
             monitor: None,
             awww: AwwwOptions::default(),
             custom_css: None,
+            post_command: String::new(),
             sidebar_width: default_sidebar_width(),
             show_filenames: false,
             group_by: Vec::new(),
@@ -529,6 +534,7 @@ mod tests {
             serde_json::from_str(r#"{"wallpaper_root":"/x","backend":"awww"}"#).unwrap();
         assert_eq!(cfg.monitor, None);
         assert_eq!(cfg.awww, AwwwOptions::default());
+        assert!(cfg.post_command.is_empty());
         assert_eq!(cfg.sidebar_width, BASE_MIN_SIDEBAR_WIDTH);
         assert!(!cfg.show_filenames);
         assert_eq!(cfg.sort_by, SortBy::NameAsc);

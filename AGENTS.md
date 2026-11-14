@@ -21,4 +21,4 @@ Implementation:
 
 ## Persist chosen options
 
-Every user-chosen Browse/Output/Gallery setting that is not ephemeral must live in `~/.config/walltag/config.json` via `AppConfig` and restore on startup. That includes filters, sort, group-by, zoom, gui scale, sidebar width/visibility, monitor, backend, and awww options. Changing the wallpaper root may reset Browse filters; persist that reset too.
+Every user-chosen Browse/Output/Gallery setting that is not ephemeral must live in `~/.config/walltag/config.json` via `AppConfig` and restore on startup. That includes filters, sort, group-by, zoom, gui scale, sidebar width/visibility, monitor, backend, awww options, and post_command. Changing the wallpaper root may reset Browse filters; persist that reset too.

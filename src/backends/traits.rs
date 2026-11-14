@@ -11,6 +11,8 @@ pub struct ApplyOptions {
     pub monitor: Option<String>,
     pub transition_secs: f32,
     pub awww: AwwwOptions,
+    /// Shell command after a successful set. Empty skips the hook.
+    pub post_command: String,
 }
 
 impl ApplyOptions {
@@ -19,7 +21,14 @@ impl ApplyOptions {
             monitor: config.monitor.clone().filter(|m| !m.is_empty()),
             transition_secs: config.transition_secs,
             awww: config.awww,
+            post_command: config.post_command.clone(),
         }
+    }
+
+    /// Drop the post-set hook (for example `--restore --no-post-command`).
+    pub fn without_post_command(mut self) -> Self {
+        self.post_command.clear();
+        self
     }
 }
 

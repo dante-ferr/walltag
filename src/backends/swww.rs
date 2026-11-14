@@ -53,6 +53,7 @@ mod tests {
             monitor: monitor.map(str::to_string),
             transition_secs: 1.0,
             awww: AwwwOptions::default(),
+            post_command: String::new(),
         }
     }
 

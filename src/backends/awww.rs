@@ -65,6 +65,7 @@ mod tests {
                 fps: 60,
                 angle: 90,
             },
+            post_command: String::new(),
         }
     }
 
