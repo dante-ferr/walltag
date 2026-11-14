@@ -137,6 +137,41 @@ pub struct AppConfig {
     /// Show each wallpaper's file name under its tile.
     #[serde(default)]
     pub show_filenames: bool,
+    /// How the gallery groups wallpapers (none, folder, or tag).
+    #[serde(default)]
+    pub group_by: GroupBy,
+}
+
+/// How the gallery groups wallpapers under section headers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum GroupBy {
+    #[default]
+    None,
+    /// Group by subfolder relative to the wallpaper root ("workspace").
+    Folder,
+    /// Group by tag. Each wallpaper appears under its first tag, or Untagged.
+    Tag,
+}
+
+impl GroupBy {
+    pub const ALL: [Self; 3] = [Self::None, Self::Folder, Self::Tag];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Folder => "folder",
+            Self::Tag => "tag",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Folder => "Folder",
+            Self::Tag => "Tag",
+        }
+    }
 }
 
 pub const MIN_SIDEBAR_WIDTH: i32 = 260;
@@ -161,6 +196,7 @@ impl Default for AppConfig {
             custom_css: None,
             sidebar_width: default_sidebar_width(),
             show_filenames: false,
+            group_by: GroupBy::default(),
         }
     }
 }

@@ -1,4 +1,5 @@
 mod app;
+mod filter;
 mod gallery;
 mod masonry;
 mod sidebar;

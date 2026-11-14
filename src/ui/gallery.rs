@@ -8,6 +8,7 @@ use gtk4::{gio, glib, Box, Label, Orientation, PolicyType, ScrolledWindow, Searc
 use crate::backends::ApplyOptions;
 use crate::metadata::MetadataStore;
 use crate::scan::WallpaperEntry;
+use crate::ui::filter::{build_rows, GalleryFilter, GalleryRow};
 use crate::ui::masonry::{GridItem, MasonryGrid, FALLBACK_ASPECT};
 use crate::ui::thumbs::probe_dimensions;
 use crate::AppConfig;
@@ -20,15 +21,21 @@ pub struct GalleryModel {
     entries: Rc<RefCell<Vec<WallpaperEntry>>>,
     metadata: Rc<RefCell<MetadataStore>>,
     config: Rc<RefCell<AppConfig>>,
+    filter: Rc<RefCell<GalleryFilter>>,
 }
 
 impl GalleryModel {
     /// `config` is shared with the rest of the UI so sidebar changes apply immediately.
     pub fn new(config: Rc<RefCell<AppConfig>>, metadata: MetadataStore) -> Self {
+        let group_by = config.borrow().group_by;
         Self {
             entries: Rc::new(RefCell::new(Vec::new())),
             metadata: Rc::new(RefCell::new(metadata)),
             config,
+            filter: Rc::new(RefCell::new(GalleryFilter {
+                group_by,
+                ..Default::default()
+            })),
         }
     }
 
@@ -51,6 +58,10 @@ impl GalleryModel {
     pub fn entries(&self) -> Rc<RefCell<Vec<WallpaperEntry>>> {
         self.entries.clone()
     }
+
+    pub fn filter(&self) -> Rc<RefCell<GalleryFilter>> {
+        self.filter.clone()
+    }
 }
 
 pub struct GalleryView {
@@ -61,6 +72,8 @@ pub struct GalleryView {
     model: GalleryModel,
     dimensions: Dimensions,
     generation: Rc<Cell<u64>>,
+    /// Invoked after the visible set changes so the sidebar can refresh filter lists.
+    on_repopulated: Rc<RefCell<Vec<Rc<dyn Fn()>>>>,
 }
 
 impl GalleryView {
@@ -93,17 +106,40 @@ impl GalleryView {
             model,
             dimensions: Rc::new(RefCell::new(HashMap::new())),
             generation: Rc::new(Cell::new(0)),
+            on_repopulated: Rc::new(RefCell::new(Vec::new())),
         };
         view.wire_filters();
         view
+    }
+
+    pub fn connect_repopulated<F: Fn() + 'static>(&self, f: F) {
+        self.on_repopulated.borrow_mut().push(Rc::new(f));
+    }
+
+    /// Rebuilds the grid from the current entries, metadata, and filter.
+    pub fn refresh(&self, reset_scroll: bool) {
+        populate(
+            &self.grid,
+            &self.model,
+            &self.dimensions.borrow(),
+            reset_scroll,
+        );
+        for cb in self.on_repopulated.borrow().iter() {
+            cb();
+        }
     }
 
     fn wire_filters(&self) {
         let grid = self.grid.clone();
         let model = self.model.clone();
         let dimensions = self.dimensions.clone();
+        let on_repopulated = self.on_repopulated.clone();
         self.search.connect_search_changed(move |entry| {
-            populate(&grid, &model, &dimensions.borrow(), &entry.text(), true);
+            model.filter.borrow_mut().query = entry.text().to_string();
+            populate(&grid, &model, &dimensions.borrow(), true);
+            for cb in on_repopulated.borrow().iter() {
+                cb();
+            }
         });
     }
 
@@ -118,6 +154,9 @@ impl GalleryView {
             .map(|e| (e.relative_key.clone(), e.absolute.clone()))
             .collect();
         self.search.set_text("");
+        self.model.filter.borrow_mut().query.clear();
+        self.model.filter.borrow_mut().tag = None;
+        self.model.filter.borrow_mut().folder = None;
         self.model.set_entries(entries);
         self.dimensions.borrow_mut().clear();
         self.grid.set_items(Vec::new(), true);
@@ -126,7 +165,7 @@ impl GalleryView {
         let model = self.model.clone();
         let dimensions = self.dimensions.clone();
         let current = self.generation.clone();
-        let search = self.search.clone();
+        let on_repopulated = self.on_repopulated.clone();
         glib::spawn_future_local(async move {
             let Ok(found) = gio::spawn_blocking(move || probe_dimensions(probe_input)).await
             else {
@@ -136,7 +175,10 @@ impl GalleryView {
                 return;
             }
             *dimensions.borrow_mut() = found;
-            populate(&grid, &model, &dimensions.borrow(), &search.text(), true);
+            populate(&grid, &model, &dimensions.borrow(), true);
+            for cb in on_repopulated.borrow().iter() {
+                cb();
+            }
         });
     }
 
@@ -171,31 +213,32 @@ fn populate(
     grid: &MasonryGrid,
     model: &GalleryModel,
     dimensions: &HashMap<String, (i32, i32)>,
-    query: &str,
     reset_scroll: bool,
 ) {
-    let query = query.to_lowercase();
     let metadata = model.metadata();
     let metadata = metadata.borrow();
-    let items: Vec<GridItem> = model
-        .entries()
-        .borrow()
-        .iter()
-        .filter(|wp| query.is_empty() || wp.file_name.to_lowercase().contains(&query))
-        .map(|wp| {
-            let (aspect, natural_width) = match dimensions.get(&wp.relative_key) {
-                Some(&(w, h)) => (w as f32 / h as f32, w),
-                None => (FALLBACK_ASPECT, 0),
-            };
-            let record = metadata.record_for_key(&wp.relative_key);
-            let tooltip = tooltip_text(&wp.file_name, &record.tags);
-            GridItem {
-                key: wp.relative_key.clone(),
-                path: wp.absolute.clone(),
-                aspect,
-                natural_width,
-                tooltip,
-                file_name: wp.file_name.clone(),
+    let filter = model.filter.borrow().clone();
+    let rows = build_rows(&model.entries().borrow(), &metadata, &filter);
+    let items: Vec<GridItem> = rows
+        .into_iter()
+        .map(|row| match row {
+            GalleryRow::Header(title) => GridItem::header(title),
+            GalleryRow::Wallpaper(wp) => {
+                let (aspect, natural_width) = match dimensions.get(&wp.relative_key) {
+                    Some(&(w, h)) => (w as f32 / h as f32, w),
+                    None => (FALLBACK_ASPECT, 0),
+                };
+                let record = metadata.record_for_key(&wp.relative_key);
+                let tooltip = tooltip_text(&wp.file_name, &record.tags);
+                GridItem {
+                    key: wp.relative_key.clone(),
+                    path: wp.absolute.clone(),
+                    aspect,
+                    natural_width,
+                    tooltip,
+                    file_name: wp.file_name.clone(),
+                    section_title: None,
+                }
             }
         })
         .collect();
@@ -231,10 +274,41 @@ pub fn assign_tags(
     saved
 }
 
+/// Applies a random wallpaper from the currently filtered set (ignoring section headers).
+pub fn set_random_wallpaper(model: &GalleryModel) -> anyhow::Result<Option<String>> {
+    let metadata = model.metadata();
+    let metadata = metadata.borrow();
+    let filter = model.filter.borrow().clone();
+    let rows = build_rows(&model.entries().borrow(), &metadata, &filter);
+    let candidates: Vec<_> = rows
+        .into_iter()
+        .filter_map(|r| match r {
+            GalleryRow::Wallpaper(wp) => Some(wp),
+            GalleryRow::Header(_) => None,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as usize)
+        .unwrap_or(0);
+    let entry = candidates[seed % candidates.len()].clone();
+    let cfg = model.config().borrow().clone();
+    let options = ApplyOptions::from_config(&cfg);
+    crate::backends::apply_wallpaper(cfg.backend, &entry.absolute, &options)?;
+    Cli::persist_last_wallpaper(&cfg, &entry.absolute)?;
+    Ok(Some(entry.relative_key))
+}
+
 pub fn wire_activate(grid: &MasonryGrid, model: &GalleryModel) {
     let config = model.config();
     let entries = model.entries();
     grid.connect_item_activated(move |item| {
+        if item.is_header() {
+            return;
+        }
         let Some(entry) = entries
             .borrow()
             .iter()
@@ -275,6 +349,13 @@ pub fn default_app_css() -> &'static str {
       font-size: 0.9em;
       padding: 0 2px;
       color: alpha(@window_fg_color, 0.8);
+    }
+    .walltag-section-header {
+      font-weight: 600;
+      font-size: 1.05em;
+      padding: 4px 2px;
+      color: @window_fg_color;
+      opacity: 0.85;
     }
     /* Flat dropdown indicator: no chip, border, or extra padding around the arrow. */
     row.combo image.dropdown-arrow,

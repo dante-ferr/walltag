@@ -11,12 +11,15 @@ use libadwaita::{
     ActionRow, ComboRow, EntryRow, HeaderBar, PreferencesGroup, SpinRow, ToolbarView,
 };
 
-use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths};
+use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy};
 use crate::metadata::parse_tag_input;
-use crate::ui::gallery::{assign_tags, GalleryModel};
+use crate::ui::filter::{collect_folders, collect_tags, folder_label};
+use crate::ui::gallery::{assign_tags, set_random_wallpaper, GalleryModel, GalleryView};
 use crate::ui::masonry::MasonryGrid;
 
 const ALL_MONITORS: &str = "All monitors";
+const ALL_TAGS: &str = "All tags";
+const ALL_FOLDERS: &str = "All folders";
 
 /// Sidebar with filename search, output, backend, and awww animation controls. Changes update the shared
 /// config immediately and persist to the XDG config file. An **Edit** section at the bottom
@@ -30,10 +33,11 @@ pub struct Sidebar {
 impl Sidebar {
     pub fn new(
         config: Rc<RefCell<AppConfig>>,
-        grid: MasonryGrid,
+        gallery: Rc<GalleryView>,
         model: GalleryModel,
-        search: SearchEntry,
     ) -> Self {
+        let grid = gallery.grid.clone();
+        let search = gallery.search.clone();
         let monitor_row = ComboRow::builder()
             .title("Monitor")
             .subtitle("Output that receives the wallpaper")
@@ -226,12 +230,14 @@ impl Sidebar {
             });
         }
 
+        let search_group = build_search_section(config.clone(), gallery.clone(), model.clone(), search);
+
         let content = Box::new(Orientation::Vertical, 18);
         content.set_margin_top(12);
         content.set_margin_bottom(12);
         content.set_margin_start(12);
         content.set_margin_end(12);
-        content.append(&search);
+        content.append(&search_group);
         content.append(&output_group);
         content.append(&gallery_group);
         content.append(&awww_group);
@@ -254,7 +260,7 @@ impl Sidebar {
         let toolbar = ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&scroll));
-        toolbar.add_bottom_bar(&build_edit_section(grid, model));
+        toolbar.add_bottom_bar(&build_edit_section(gallery.clone(), grid, model));
 
         Self {
             widget: toolbar.upcast(),
@@ -266,9 +272,191 @@ impl Sidebar {
 const EMPTY_SELECTION_HINT: &str =
     "No wallpapers selected. Right-click a wallpaper, or drag a box around several, to select them.";
 
+/// Search session: filename search, group-by, tag/folder filters, and random pick.
+fn build_search_section(
+    config: Rc<RefCell<AppConfig>>,
+    gallery: Rc<GalleryView>,
+    model: GalleryModel,
+    search: SearchEntry,
+) -> PreferencesGroup {
+    let group = PreferencesGroup::builder()
+        .title("Search")
+        .description("Filter and group the gallery")
+        .build();
+
+    let search_row = ActionRow::builder()
+        .title("Filename")
+        .activatable(false)
+        .build();
+    search.set_hexpand(true);
+    search_row.add_suffix(&search);
+    group.add(&search_row);
+
+    let group_row = ComboRow::builder()
+        .title("Group by")
+        .subtitle("Section headers in the gallery")
+        .model(&StringList::new(
+            &GroupBy::ALL.map(GroupBy::label),
+        ))
+        .build();
+    group_row.set_selected(
+        GroupBy::ALL
+            .iter()
+            .position(|g| *g == config.borrow().group_by)
+            .unwrap_or(0) as u32,
+    );
+    group.add(&group_row);
+
+    let tag_row = ComboRow::builder()
+        .title("Tag")
+        .subtitle("Show only wallpapers with this tag")
+        .build();
+    group.add(&tag_row);
+
+    let folder_row = ComboRow::builder()
+        .title("Folder")
+        .subtitle("Show only wallpapers in this workspace folder")
+        .build();
+    group.add(&folder_row);
+
+    let random = Button::builder()
+        .label("Random")
+        .tooltip_text("Set a random wallpaper from the current search results")
+        .halign(gtk4::Align::End)
+        .css_classes(["pill"])
+        .build();
+    let random_row = ActionRow::builder()
+        .title("Random wallpaper")
+        .subtitle("Uses the current filters")
+        .activatable(false)
+        .build();
+    random_row.add_suffix(&random);
+    group.add(&random_row);
+
+    // Tag filter options: index 0 = all; then each tag string.
+    let tag_options: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    // Folder filter options: index 0 = all; then parent_relative keys.
+    let folder_options: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    let rebuilding = Rc::new(Cell::new(false));
+
+    let rebuild_filters: Rc<dyn Fn()> = {
+        let tag_row = tag_row.clone();
+        let folder_row = folder_row.clone();
+        let tag_options = tag_options.clone();
+        let folder_options = folder_options.clone();
+        let model = model.clone();
+        let rebuilding = rebuilding.clone();
+        Rc::new(move || {
+            rebuilding.set(true);
+            let entries = model.entries().borrow().clone();
+            let metadata = model.metadata();
+            let metadata = metadata.borrow();
+            let filter = model.filter().borrow().clone();
+
+            let tags = collect_tags(&entries, &metadata);
+            let mut tag_labels = vec![ALL_TAGS.to_owned()];
+            tag_labels.extend(tags.iter().cloned());
+            let mut tag_opts = vec![None];
+            tag_opts.extend(tags.into_iter().map(Some));
+            let tag_sel = filter
+                .tag
+                .as_ref()
+                .and_then(|t| tag_opts.iter().position(|o| o.as_ref() == Some(t)))
+                .unwrap_or(0);
+            tag_row.set_model(Some(&StringList::new(
+                &tag_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )));
+            tag_row.set_selected(tag_sel as u32);
+            *tag_options.borrow_mut() = tag_opts;
+
+            let folders = collect_folders(&entries);
+            let mut folder_labels = vec![ALL_FOLDERS.to_owned()];
+            folder_labels.extend(folders.iter().map(|f| folder_label(f)));
+            let mut folder_opts = vec![None];
+            folder_opts.extend(folders.into_iter().map(Some));
+            let folder_sel = filter
+                .folder
+                .as_ref()
+                .and_then(|f| folder_opts.iter().position(|o| o.as_ref() == Some(f)))
+                .unwrap_or(0);
+            folder_row.set_model(Some(&StringList::new(
+                &folder_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )));
+            folder_row.set_selected(folder_sel as u32);
+            *folder_options.borrow_mut() = folder_opts;
+            rebuilding.set(false);
+        })
+    };
+    rebuild_filters();
+    gallery.connect_repopulated({
+        let rebuild_filters = rebuild_filters.clone();
+        move || rebuild_filters()
+    });
+
+    {
+        let config = config.clone();
+        let gallery = gallery.clone();
+        let model = model.clone();
+        group_row.connect_selected_notify(move |row| {
+            let Some(kind) = GroupBy::ALL.get(row.selected() as usize).copied() else {
+                return;
+            };
+            model.filter().borrow_mut().group_by = kind;
+            update(&config, |cfg| cfg.group_by = kind);
+            gallery.refresh(true);
+        });
+    }
+    {
+        let gallery = gallery.clone();
+        let model = model.clone();
+        let tag_options = tag_options.clone();
+        let rebuilding = rebuilding.clone();
+        tag_row.connect_selected_notify(move |row| {
+            if rebuilding.get() {
+                return;
+            }
+            let choice = tag_options
+                .borrow()
+                .get(row.selected() as usize)
+                .cloned()
+                .flatten();
+            model.filter().borrow_mut().tag = choice;
+            gallery.refresh(true);
+        });
+    }
+    {
+        let gallery = gallery.clone();
+        let model = model.clone();
+        let folder_options = folder_options.clone();
+        let rebuilding = rebuilding.clone();
+        folder_row.connect_selected_notify(move |row| {
+            if rebuilding.get() {
+                return;
+            }
+            let choice = folder_options
+                .borrow()
+                .get(row.selected() as usize)
+                .cloned()
+                .flatten();
+            model.filter().borrow_mut().folder = choice;
+            gallery.refresh(true);
+        });
+    }
+    {
+        let model = model.clone();
+        random.connect_clicked(move |_| match set_random_wallpaper(&model) {
+            Ok(Some(key)) => tracing::info!("Random wallpaper: {key}"),
+            Ok(None) => tracing::warn!("No wallpapers match the current filters"),
+            Err(err) => tracing::error!("Failed to set random wallpaper: {err:#}"),
+        });
+    }
+
+    group
+}
+
 /// Edit section pinned to the bottom of the sidebar. It shows how many wallpapers are in
 /// the gallery's edit batch and adds the typed tags to each of them.
-fn build_edit_section(grid: MasonryGrid, model: GalleryModel) -> Box {
+fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: GalleryModel) -> Box {
     let clear = Button::builder()
         .label("Clear")
         .tooltip_text("Clear selection (Esc)")
@@ -311,6 +499,7 @@ fn build_edit_section(grid: MasonryGrid, model: GalleryModel) -> Box {
     }
     {
         let group = group.clone();
+        let gallery = gallery.clone();
         tags_row.connect_apply(move |row| {
             let tags = parse_tag_input(&row.text());
             let keys = grid.selected_keys();
@@ -325,6 +514,8 @@ fn build_edit_section(grid: MasonryGrid, model: GalleryModel) -> Box {
                         tags.join(", "),
                         keys.len()
                     )));
+                    // Rebuild so tag groups and the tag filter list stay current.
+                    gallery.refresh(false);
                 }
                 Err(err) => {
                     tracing::error!("Failed to save tags: {err:#}");

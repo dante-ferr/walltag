@@ -32,17 +32,41 @@ const MIN_WIDGET_WIDTH: i32 = 120;
 /// Aspect ratio (width / height) used when a file's size could not be read.
 pub const FALLBACK_ASPECT: f32 = 16.0 / 9.0;
 
+/// Logical height of a group section header row.
+pub const SECTION_HEADER_HEIGHT: i32 = 32;
+
 #[derive(Debug, Clone)]
 pub struct GridItem {
     pub key: String,
     pub path: PathBuf,
-    /// Width divided by height.
+    /// Width divided by height. Ignored when [`Self::section_title`] is set.
     pub aspect: f32,
     /// Source width in pixels, or 0 if unknown. Caps thumbnail size.
     pub natural_width: i32,
     pub tooltip: String,
     /// Shown under the tile when file names are enabled.
     pub file_name: String,
+    /// When set, this row is a full-width group header (not a wallpaper tile).
+    pub section_title: Option<String>,
+}
+
+impl GridItem {
+    pub fn is_header(&self) -> bool {
+        self.section_title.is_some()
+    }
+
+    pub fn header(title: impl Into<String>) -> Self {
+        let title = title.into();
+        Self {
+            key: format!("header:{title}"),
+            path: PathBuf::new(),
+            aspect: 1.0,
+            natural_width: 0,
+            tooltip: String::new(),
+            file_name: String::new(),
+            section_title: Some(title),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,31 +94,51 @@ impl Rect {
 pub struct Layout {
     pub width: i32,
     pub height: i32,
-    /// Image area of each tile.
+    /// Image area of each tile (or header band).
     pub rects: Vec<Rect>,
+    /// Parallel to `rects`: true when the row is a section header.
+    pub is_header: Vec<bool>,
     /// Height of the file name strip directly under each image; 0 when names are hidden.
     pub label_height: i32,
 }
 
 impl Layout {
-    /// Image plus label strip. Hit tests, selection, and virtualization use the cell.
+    /// Image plus label strip (headers have no label strip). Hit tests, selection, and
+    /// virtualization use the cell.
     pub fn cell(&self, idx: usize) -> Option<Rect> {
-        self.rects.get(idx).map(|r| Rect {
-            h: r.h + self.label_height,
-            ..*r
+        self.rects.get(idx).map(|r| {
+            let extra = if self.is_header.get(idx).copied().unwrap_or(false) {
+                0
+            } else {
+                self.label_height
+            };
+            Rect {
+                h: r.h + extra,
+                ..*r
+            }
         })
     }
 
-    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
-        (0..self.rects.len()).find(|&i| self.cell(i).is_some_and(|c| c.contains(x, y)))
+    pub fn is_header(&self, idx: usize) -> bool {
+        self.is_header.get(idx).copied().unwrap_or(false)
     }
 
-    /// Indices of tiles that overlap the rectangle spanned by two corner points.
+    /// Hit-test wallpaper tiles only (section headers are ignored).
+    pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
+        (0..self.rects.len()).find(|&i| {
+            !self.is_header(i) && self.cell(i).is_some_and(|c| c.contains(x, y))
+        })
+    }
+
+    /// Indices of wallpaper tiles that overlap the rectangle spanned by two corner points.
     pub fn hit_rect(&self, x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<usize> {
         let (left, right) = (x0.min(x1), x0.max(x1));
         let (top, bottom) = (y0.min(y1), y0.max(y1));
         (0..self.rects.len())
             .filter(|&i| {
+                if self.is_header(i) {
+                    return false;
+                }
                 let r = self.cell(i).expect("index in range");
                 (r.x as f64) < right
                     && ((r.x + r.w) as f64) > left
@@ -171,12 +215,27 @@ pub fn compute_layout(aspects: &[f32], width: i32) -> Layout {
 
 /// Like `compute_layout`, with the target column width scaled by `zoom` and a
 /// `label_height` strip reserved under every image (0 for none).
+#[allow(dead_code)]
 pub fn compute_layout_zoomed(
     aspects: &[f32],
     width: i32,
     zoom: f32,
     label_height: i32,
 ) -> Layout {
+    let flags: Vec<bool> = aspects.iter().map(|_| false).collect();
+    compute_layout_with_headers(aspects, &flags, width, zoom, label_height)
+}
+
+/// Masonry layout that supports full-width section headers. `is_header[i]` marks
+/// item `i` as a header (aspect ignored); headers flush columns and span `width`.
+pub fn compute_layout_with_headers(
+    aspects: &[f32],
+    is_header: &[bool],
+    width: i32,
+    zoom: f32,
+    label_height: i32,
+) -> Layout {
+    assert_eq!(aspects.len(), is_header.len());
     let label_height = label_height.max(0);
     let width = width.max(1);
     let mut columns = columns_for_width_zoomed(width, zoom);
@@ -191,7 +250,25 @@ pub fn compute_layout_zoomed(
     let mut heights = vec![0i32; columns];
     let mut rects = Vec::with_capacity(aspects.len());
 
-    for aspect in aspects {
+    for (i, aspect) in aspects.iter().enumerate() {
+        if is_header.get(i).copied().unwrap_or(false) {
+            // Flush columns so the header sits below the tallest masonry column.
+            let y = heights.iter().copied().max().unwrap_or(0);
+            // Drop the trailing gap above the header when columns already have content.
+            let y = if y > TILE_GAP { y - TILE_GAP } else { y };
+            let y = if y > 0 { y + TILE_GAP } else { y };
+            rects.push(Rect {
+                x: 0,
+                y,
+                w: width,
+                h: SECTION_HEADER_HEIGHT,
+            });
+            let next_y = y + SECTION_HEADER_HEIGHT + TILE_GAP;
+            for h in &mut heights {
+                *h = next_y;
+            }
+            continue;
+        }
         let col = heights
             .iter()
             .enumerate()
@@ -218,6 +295,7 @@ pub fn compute_layout_zoomed(
         width,
         height,
         rects,
+        is_header: is_header.to_vec(),
         label_height,
     }
 }
@@ -248,7 +326,7 @@ mod imp {
     const LABEL_PAD: i32 = 6;
 
     struct Tile {
-        picture: Picture,
+        picture: Option<Picture>,
         label: Option<Label>,
         cancel: Arc<AtomicBool>,
     }
@@ -315,15 +393,26 @@ mod imp {
         fn size_allocate(&self, width: i32, _height: i32, _baseline: i32) {
             let layout = self.layout_for(width);
             for (idx, tile) in self.tiles.borrow().iter() {
-                if let Some(r) = layout.rects.get(*idx) {
-                    tile.picture
-                        .size_allocate(&gtk4::Allocation::new(r.x, r.y, r.w, r.h), -1);
+                let Some(r) = layout.rects.get(*idx) else {
+                    continue;
+                };
+                if layout.is_header(*idx) {
                     if let Some(label) = &tile.label {
                         label.size_allocate(
-                            &gtk4::Allocation::new(r.x, r.y + r.h, r.w, layout.label_height),
+                            &gtk4::Allocation::new(r.x, r.y, r.w, r.h),
                             -1,
                         );
                     }
+                    continue;
+                }
+                if let Some(picture) = &tile.picture {
+                    picture.size_allocate(&gtk4::Allocation::new(r.x, r.y, r.w, r.h), -1);
+                }
+                if let Some(label) = &tile.label {
+                    label.size_allocate(
+                        &gtk4::Allocation::new(r.x, r.y + r.h, r.w, layout.label_height),
+                        -1,
+                    );
                 }
             }
             // Realize/recycle after allocation so we never reparent during allocate.
@@ -362,6 +451,9 @@ mod imp {
                     let (Some(r), Some(item)) = (layout.cell(*idx), items.get(*idx)) else {
                         continue;
                     };
+                    if item.is_header() {
+                        continue;
+                    }
                     let is_selected = selected.contains(&item.key);
                     if !is_selected && !preview.contains(idx) {
                         continue;
@@ -427,13 +519,17 @@ mod imp {
                     return layout.clone();
                 }
             }
-            let aspects: Vec<f32> = self.items.borrow().iter().map(|i| i.aspect).collect();
-            let layout = Rc::new(compute_layout_zoomed(
+            let items = self.items.borrow();
+            let aspects: Vec<f32> = items.iter().map(|i| i.aspect).collect();
+            let headers: Vec<bool> = items.iter().map(|i| i.is_header()).collect();
+            let layout = Rc::new(compute_layout_with_headers(
                 &aspects,
+                &headers,
                 width,
                 self.zoom(),
                 self.label_height(),
             ));
+            drop(items);
             *self.layout.borrow_mut() = Some(layout.clone());
             layout
         }
@@ -511,6 +607,30 @@ mod imp {
         }
 
         fn acquire(&self, idx: usize, item: &GridItem, rect: &Rect) {
+            if let Some(title) = item.section_title.as_deref() {
+                let label = self.label_pool.borrow_mut().pop().unwrap_or_else(|| {
+                    let l = Label::new(None);
+                    l.set_xalign(0.0);
+                    l.set_single_line_mode(true);
+                    l.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                    l.set_valign(gtk4::Align::Center);
+                    l
+                });
+                label.set_text(title);
+                label.remove_css_class("walltag-tile-name");
+                label.add_css_class("walltag-section-header");
+                label.set_parent(&*self.obj());
+                self.tiles.borrow_mut().insert(
+                    idx,
+                    Tile {
+                        picture: None,
+                        label: Some(label),
+                        cancel: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+                return;
+            }
+
             let picture = self.pool.borrow_mut().pop().unwrap_or_else(|| {
                 let p = Picture::new();
                 p.set_can_shrink(true);
@@ -534,16 +654,22 @@ mod imp {
                     l.set_single_line_mode(true);
                     l.set_ellipsize(gtk4::pango::EllipsizeMode::End);
                     l.set_valign(gtk4::Align::Center);
-                    l.add_css_class("walltag-tile-name");
                     l
                 });
+                label.remove_css_class("walltag-section-header");
+                label.add_css_class("walltag-tile-name");
                 label.set_text(&item.file_name);
                 label.set_parent(&*self.obj());
                 label
             });
-            self.tiles
-                .borrow_mut()
-                .insert(idx, Tile { picture, label, cancel });
+            self.tiles.borrow_mut().insert(
+                idx,
+                Tile {
+                    picture: Some(picture),
+                    label,
+                    cancel,
+                },
+            );
         }
 
         fn release(&self, idx: usize) {
@@ -551,14 +677,18 @@ mod imp {
                 return;
             };
             tile.cancel.store(true, Ordering::Relaxed);
-            tile.picture.set_paintable(None::<&gtk4::gdk::Paintable>);
-            tile.picture.unparent();
-            let mut pool = self.pool.borrow_mut();
-            if pool.len() < MAX_POOL {
-                pool.push(tile.picture);
+            if let Some(picture) = tile.picture {
+                picture.set_paintable(None::<&gtk4::gdk::Paintable>);
+                picture.unparent();
+                let mut pool = self.pool.borrow_mut();
+                if pool.len() < MAX_POOL {
+                    pool.push(picture);
+                }
             }
             if let Some(label) = tile.label {
                 label.unparent();
+                label.remove_css_class("walltag-section-header");
+                label.remove_css_class("walltag-tile-name");
                 let mut pool = self.label_pool.borrow_mut();
                 if pool.len() < MAX_POOL {
                     pool.push(label);
@@ -759,11 +889,12 @@ impl MasonryGrid {
     pub fn selected_keys(&self) -> Vec<String> {
         let imp = self.imp();
         let selected = imp.selected.borrow();
+        let mut seen = HashSet::new();
         imp.items
             .borrow()
             .iter()
-            .filter(|i| selected.contains(&i.key))
-            .map(|i| i.key.clone())
+            .filter(|i| !i.is_header() && selected.contains(&i.key))
+            .filter_map(|i| seen.insert(i.key.clone()).then(|| i.key.clone()))
             .collect()
     }
 

@@ -71,12 +71,7 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
 
     let toast_overlay = ToastOverlay::new();
 
-    let sidebar = Sidebar::new(
-        config.clone(),
-        gallery.grid.clone(),
-        model.clone(),
-        gallery.search.clone(),
-    );
+    let sidebar = Sidebar::new(config.clone(), gallery.clone(), model.clone());
     // The sidebar sits in a `Paned` so the user can drag the divider to resize it.
     sidebar.widget.set_size_request(MIN_SIDEBAR_WIDTH, -1);
     let split = Paned::builder()

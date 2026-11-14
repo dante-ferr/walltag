@@ -6,6 +6,6 @@ pub mod scan;
 pub mod ui;
 
 pub use cli::Cli;
-pub use config::{AppConfig, BackendKind, ConfigPaths};
+pub use config::{AppConfig, BackendKind, ConfigPaths, GroupBy};
 pub use metadata::{MetadataStore, WallpaperRecord};
 pub use scan::{WallpaperEntry, scan_wallpapers};

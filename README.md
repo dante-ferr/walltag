@@ -41,6 +41,17 @@ cargo run -- --restore
 
 Set log verbosity with `RUST_LOG`, for example `RUST_LOG=walltag=debug`.
 
+## Gallery search
+
+The sidebar **Search** section includes:
+
+- Filename search
+- **Group by** None, Folder (workspace), or Tag (section headers in the grid)
+- **Tag** and **Folder** filters
+- **Random** wallpaper from the current filtered set
+
+Tag assignment is in the sidebar **Edit** section (select tiles with right-click or drag).
+
 ## Status
 
-Early foundation: config, portable metadata, recursive scan, backend stubs, and a basic Libadwaita gallery window.
+Working MVP: masonry gallery, portable metadata, swww/awww backends, `--restore`, multi-select tagging, and folder/tag grouping.
