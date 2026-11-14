@@ -21,6 +21,7 @@ use crate::config::{sidebar_limits, ConfigPaths};
 use crate::metadata::MetadataStore;
 use crate::scan::scan_wallpapers;
 use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryView};
+use crate::ui::gallery_scroll::wire_gallery_arrow_keys;
 use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
 use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
 use crate::ui::overlay::{close_focused_dialog, overlay_css};
@@ -238,6 +239,7 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
         &gui_scale_provider,
     );
     wire_clear_selection(&window, &gallery.grid);
+    wire_gallery_arrow_keys(window.upcast_ref(), gallery.scroller());
 
     wire_wallpaper_folder_picker(&sidebar.pick_folder, &window, config, model, gallery);
 

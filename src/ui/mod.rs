@@ -4,6 +4,7 @@ mod color;
 mod dim_cache;
 mod filter;
 mod gallery;
+mod gallery_scroll;
 mod gui_scale;
 mod masonry;
 mod overlay;

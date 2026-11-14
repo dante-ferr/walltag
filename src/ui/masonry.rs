@@ -419,7 +419,7 @@ mod imp {
     use crate::ui::thumbs::Thumbnailer;
 
     /// Tiles within this many viewport heights above/below the view are realized.
-    const REALIZE_PAD: f64 = 0.75;
+    const REALIZE_PAD: f64 = 1.0;
     /// Tiles beyond this many viewport heights are recycled (hysteresis avoids thrash).
     const RECYCLE_PAD: f64 = 1.5;
     const MAX_POOL: usize = 64;
@@ -751,14 +751,8 @@ mod imp {
             if let Some(adj) = adj {
                 // Set the new range ourselves; the viewport only does so after the next
                 // allocation, which would show one frame at the wrong offset.
-                adj.configure(
-                    value,
-                    adj.lower(),
-                    upper,
-                    adj.step_increment(),
-                    adj.page_increment(),
-                    page,
-                );
+                let step = (page * 0.22).clamp(64.0, 480.0);
+                adj.configure(value, adj.lower(), upper, step, page * 0.92, page);
             }
             self.sync();
             obj.queue_resize();
@@ -998,12 +992,15 @@ mod imp {
             self.anim_e.set(1.0);
         }
 
-        fn queue_sync(&self) {
+        pub(super) fn queue_sync(&self) {
             if self.sync_queued.replace(true) {
                 return;
             }
-            let obj = self.obj().clone();
-            glib::idle_add_local_full(glib::Priority::HIGH, move || {
+            let weak = self.obj().downgrade();
+            self.obj().add_tick_callback(move |_, _| {
+                let Some(obj) = weak.upgrade() else {
+                    return glib::ControlFlow::Break;
+                };
                 let imp = obj.imp();
                 imp.sync_queued.set(false);
                 imp.sync();
@@ -1248,6 +1245,11 @@ glib::wrapper! {
 }
 
 impl MasonryGrid {
+    /// Coalesces viewport tile realize/recycle to the next frame (kinetic scroll, wheel).
+    pub fn schedule_viewport_sync(&self) {
+        self.imp().queue_sync();
+    }
+
     /// `vadjustment` is the vertical adjustment of the `ScrolledWindow` that hosts the grid.
     pub fn new(vadjustment: &Adjustment) -> Self {
         let grid: Self = glib::Object::new();
@@ -1260,13 +1262,13 @@ impl MasonryGrid {
         let weak = grid.downgrade();
         vadjustment.connect_value_changed(move |_| {
             if let Some(grid) = weak.upgrade() {
-                grid.imp().sync();
+                grid.schedule_viewport_sync();
             }
         });
         let weak = grid.downgrade();
         vadjustment.connect_changed(move |_| {
             if let Some(grid) = weak.upgrade() {
-                grid.imp().sync();
+                grid.schedule_viewport_sync();
             }
         });
 

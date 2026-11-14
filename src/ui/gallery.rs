@@ -5,12 +5,14 @@ use std::rc::Rc;
 use gtk4::prelude::*;
 use gtk4::{gio, glib, Box, Label, Orientation, PolicyType, ScrolledWindow, SearchEntry, Spinner};
 
+
 use crate::backends::ApplyOptions;
 use crate::metadata::MetadataStore;
 use crate::scan::WallpaperEntry;
 use crate::ui::color::probe_colors;
 use crate::ui::dim_cache::{resolve_dimensions, DimensionCache};
 use crate::ui::filter::{build_rows, GalleryFilter, GalleryRow, SortBy, SortData};
+use crate::ui::gallery_scroll::{install_gallery_scroller, GalleryScroller};
 use crate::ui::masonry::{GridItem, MasonryGrid, FALLBACK_ASPECT};
 use crate::AppConfig;
 use crate::Cli;
@@ -108,6 +110,7 @@ pub struct GalleryView {
     /// Not placed in the gallery; the sidebar hosts it.
     pub search: SearchEntry,
     pub grid: MasonryGrid,
+    scroller: GalleryScroller,
     /// Shown in the window top bar while scans or hue sampling run.
     pub spinner: Spinner,
     model: GalleryModel,
@@ -141,15 +144,18 @@ impl GalleryView {
             .vexpand(true)
             .hexpand(true)
             .hscrollbar_policy(PolicyType::Never)
+            .kinetic_scrolling(true)
             .build();
         let grid = MasonryGrid::new(&scroll.vadjustment());
         scroll.set_child(Some(&grid));
+        let scroller = install_gallery_scroller(&scroll);
         root.append(&scroll);
 
         let view = Self {
             root,
             search,
             grid,
+            scroller,
             spinner,
             model,
             dimensions: Rc::new(RefCell::new(HashMap::new())),
@@ -180,6 +186,10 @@ impl GalleryView {
 
     pub fn connect_repopulated<F: Fn() + 'static>(&self, f: F) {
         self.on_repopulated.borrow_mut().push(Rc::new(f));
+    }
+
+    pub fn scroller(&self) -> &GalleryScroller {
+        &self.scroller
     }
 
     /// Rebuilds the grid from the current entries, metadata, filter, and sort. With the
