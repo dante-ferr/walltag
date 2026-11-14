@@ -5,6 +5,22 @@ edition = "2021"
 description = "Minimalist wallpaper manager and visual gallery for Linux/Wayland"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/dante-ferr/walltag"
+homepage = "https://github.com/dante-ferr/walltag"
+documentation = "https://github.com/dante-ferr/walltag#readme"
+authors = ["Dante Ferreira <dante.tf5@gmail.com>"]
+keywords = ["wallpaper", "wayland", "gtk", "gallery", "linux"]
+categories = ["multimedia", "gui", "command-line-utilities"]
+exclude = [
+  "packaging/aur/src",
+  "packaging/aur/pkg",
+  "packaging/aur/*.pkg.tar.*",
+  "packaging/flatpak/build-dir",
+  "packaging/flatpak/.flatpak-builder",
+  "packaging/flatpak/cargo-sources.json",
+  "target-*/",
+  ".github",
+]
 
 [dependencies]
 anyhow = "1"

@@ -8,6 +8,30 @@ Minimalist wallpaper manager and visual gallery for Linux on Wayland. Walltag st
 - GTK 4 and Libadwaita development packages (for example on Arch: `gtk4`, `libadwaita`)
 - A Wayland session and an installed wallpaper daemon (`swww` or `awww`)
 
+## Install
+
+### From source
+
+```bash
+cargo install --path .
+# or, after the crate is on crates.io:
+cargo install walltag
+```
+
+### Flatpak
+
+Packaging lives in [`packaging/flatpak/`](packaging/flatpak/). Build locally with `flatpak-builder`, or install from Flathub after the submission is accepted. The Flatpak needs host access so it can run `swww` / `awww` and your `post_command`.
+
+### Arch Linux (AUR)
+
+Packaging lives in [`packaging/aur/`](packaging/aur/). Upload when AUR account registration reopens. See [packaging/aur/README.md](packaging/aur/README.md).
+
+```bash
+git clone https://aur.archlinux.org/walltag.git
+cd walltag
+makepkg -si
+```
+
 ## Configuration
 
 Walltag reads `config.json` from the XDG config directory:
@@ -53,18 +77,6 @@ Set log verbosity with `RUST_LOG`, for example `RUST_LOG=walltag=debug`.
 ## Sidebar
 
 **Browse** has the wallpaper folder button, filename search, folder filter, and random pick. **Output** has monitor, backend, post command, and awww animation controls. **Gallery** has group-by, sort, tag filter, and file-name labels. **Edit** assigns tags to the selected tiles (right-click or drag).
-
-## Arch Linux (AUR)
-
-Packaging lives in `packaging/aur/`. See [packaging/aur/README.md](packaging/aur/README.md) for maintainer steps (tag, checksums, first upload).
-
-After the package is published:
-
-```bash
-git clone https://aur.archlinux.org/walltag.git
-cd walltag
-makepkg -si
-```
 
 ## Status
 

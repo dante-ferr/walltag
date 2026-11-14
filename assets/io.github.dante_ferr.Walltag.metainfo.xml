@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.dante_ferr.Walltag</id>
+  <name>Walltag</name>
+  <summary>Minimalist wallpaper manager and visual gallery for Wayland</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <developer id="io.github.dante_ferr">
+    <name>Dante Ferreira</name>
+  </developer>
+  <url type="homepage">https://github.com/dante-ferr/walltag</url>
+  <url type="bugtracker">https://github.com/dante-ferr/walltag/issues</url>
+  <url type="vcs-browser">https://github.com/dante-ferr/walltag</url>
+  <description>
+    <p>
+      Walltag is a wallpaper manager and visual gallery for Linux on Wayland.
+      Browse a masonry gallery, tag wallpapers, and set them with swww or awww.
+    </p>
+    <p>
+      Tag metadata is stored as JSON beside your wallpaper folder. A --restore
+      flag supports compositor autostart, and an optional post_command hook runs
+      after each successful set.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.dante_ferr.Walltag.desktop</launchable>
+  <provides>
+    <binary>walltag</binary>
+  </provides>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <recommends>
+    <control>touch</control>
+  </recommends>
+  <content_rating type="oars-1.1"/>
+  <categories>
+    <category>Graphics</category>
+  </categories>
+  <keywords>
+    <keyword>wallpaper</keyword>
+    <keyword>wayland</keyword>
+    <keyword>gallery</keyword>
+    <keyword>gtk</keyword>
+  </keywords>
+  <releases>
+    <release version="0.1.0" date="2026-11-14">
+      <description>
+        <p>Initial release: masonry gallery, tags, swww/awww backends, and restore.</p>
+      </description>
+    </release>
+  </releases>
+</component>

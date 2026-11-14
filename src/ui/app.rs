@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -30,7 +30,7 @@ use crate::ui::sidebar::Sidebar;
 use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
 
-const APP_ID: &str = "com.walltag.Walltag";
+const APP_ID: &str = "io.github.dante_ferr.Walltag";
 
 /// Initial main-window size, in logical pixels. Hyprland is asked for the same size after floating.
 const DEFAULT_WINDOW_WIDTH: i32 = 1080;
@@ -285,7 +285,7 @@ fn schedule_hyprland_float(attempt: u8) {
 
 /// Returns true once this process's window is found and the float request is sent.
 fn float_hyprland_window() -> bool {
-    let Ok(output) = Command::new("hyprctl")
+    let Ok(output) = crate::host_cmd::host_command("hyprctl")
         .args(["clients", "-j"])
         .stderr(Stdio::null())
         .output()
@@ -316,7 +316,7 @@ fn float_hyprland_window() -> bool {
          dispatch hl.dsp.window.resize({{ window = \"address:{address}\", x = {DEFAULT_WINDOW_WIDTH}, y = {DEFAULT_WINDOW_HEIGHT} }}); \
          dispatch hl.dsp.window.center({{ window = \"address:{address}\" }})"
     );
-    match Command::new("hyprctl")
+    match crate::host_cmd::host_command("hyprctl")
         .args(["--batch", &batch])
         .stdout(Stdio::null())
         .stderr(Stdio::null())

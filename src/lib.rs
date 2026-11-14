@@ -1,6 +1,7 @@
 pub mod backends;
 pub mod cli;
 pub mod config;
+pub mod host_cmd;
 pub mod metadata;
 pub mod scan;
 pub mod ui;

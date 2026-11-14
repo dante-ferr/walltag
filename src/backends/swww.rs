@@ -1,7 +1,8 @@
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result};
+
+use crate::host_cmd::host_command;
 
 use super::traits::{ApplyOptions, WallpaperBackend};
 
@@ -16,7 +17,7 @@ impl WallpaperBackend for SwwwBackend {
         let image = image
             .canonicalize()
             .with_context(|| format!("resolve wallpaper path {}", image.display()))?;
-        let status = Command::new("swww")
+        let status = host_command("swww")
             .args(build_args(&image, options))
             .status()
             .context("run swww img")?;

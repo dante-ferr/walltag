@@ -1,7 +1,8 @@
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result};
+
+use crate::host_cmd::host_command;
 
 use super::traits::{ApplyOptions, WallpaperBackend};
 
@@ -17,7 +18,7 @@ impl WallpaperBackend for AwwwBackend {
             .canonicalize()
             .with_context(|| format!("resolve wallpaper path {}", image.display()))?;
         // awww uses a subcommand layout that may vary by distro; this matches common installs.
-        let status = Command::new("awww")
+        let status = host_command("awww")
             .args(build_args(&image, options))
             .status()
             .context("run awww img")?;

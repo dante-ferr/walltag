@@ -5,9 +5,9 @@ mod traits;
 pub use traits::{ApplyOptions, WallpaperBackend, WallpaperState};
 
 use crate::config::BackendKind;
+use crate::host_cmd::host_command;
 use anyhow::{Context, Result};
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 
 pub fn backend_for(kind: BackendKind) -> Arc<dyn WallpaperBackend> {
@@ -39,7 +39,7 @@ fn run_post_command(image: &Path, options: &ApplyOptions) -> Result<()> {
         .replace("$wallpaper", &wallpaper)
         .replace("$monitor", monitor);
     tracing::info!("Running post_command: {command}");
-    let status = Command::new("sh")
+    let status = host_command("sh")
         .arg("-c")
         .arg(&command)
         .status()
