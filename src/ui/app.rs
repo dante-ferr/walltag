@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -285,7 +285,11 @@ fn schedule_hyprland_float(attempt: u8) {
 
 /// Returns true once this process's window is found and the float request is sent.
 fn float_hyprland_window() -> bool {
-    let Ok(output) = Command::new("hyprctl").args(["clients", "-j"]).output() else {
+    let Ok(output) = Command::new("hyprctl")
+        .args(["clients", "-j"])
+        .stderr(Stdio::null())
+        .output()
+    else {
         return false;
     };
     if !output.status.success() {
@@ -312,7 +316,12 @@ fn float_hyprland_window() -> bool {
          dispatch hl.dsp.window.resize({{ window = \"address:{address}\", x = {DEFAULT_WINDOW_WIDTH}, y = {DEFAULT_WINDOW_HEIGHT} }}); \
          dispatch hl.dsp.window.center({{ window = \"address:{address}\" }})"
     );
-    match Command::new("hyprctl").args(["--batch", &batch]).status() {
+    match Command::new("hyprctl")
+        .args(["--batch", &batch])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+    {
         Ok(status) if status.success() => true,
         Ok(status) => {
             tracing::warn!("hyprctl did not float the window (status {status})");

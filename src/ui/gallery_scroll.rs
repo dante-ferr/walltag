@@ -6,8 +6,10 @@ use std::rc::Rc;
 use gtk4::gdk::{Key, ModifierType, ScrollUnit};
 use gtk4::glib;
 use gtk4::prelude::*;
-use gtk4::{Adjustment, Editable, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
-          PropagationPhase, ScrolledWindow, Widget, Window};
+use gtk4::{
+    Adjustment, Editable, EventControllerKey, EventControllerScroll, EventControllerScrollFlags,
+    PropagationPhase, ScrolledWindow, Widget, Window,
+};
 
 use crate::ui::masonry::ease_out_cubic;
 
@@ -95,8 +97,7 @@ impl SmoothScroll {
 }
 
 fn scroll_progress(elapsed_us: i64) -> f32 {
-    ((elapsed_us.max(0) as f64) / (SCROLL_ANIM_MS * 1000.0))
-        .min(1.0) as f32
+    ((elapsed_us.max(0) as f64) / (SCROLL_ANIM_MS * 1000.0)).min(1.0) as f32
 }
 
 /// Wheel and keyboard scrolling for one gallery `ScrolledWindow`.
@@ -136,8 +137,7 @@ pub fn install_gallery_scroller(scroll: &ScrolledWindow) -> GalleryScroller {
         match ctrl.unit() {
             ScrollUnit::Wheel => {
                 let page = scroll_state.adj.page_size().max(1.0);
-                let delta =
-                    dy.signum() * page * WHEEL_PAGE_FRACTION * dy.abs().max(1.0);
+                let delta = dy.signum() * page * WHEEL_PAGE_FRACTION * dy.abs().max(1.0);
                 scroll_state.bump(delta);
                 glib::Propagation::Stop
             }

@@ -188,9 +188,7 @@ impl FloatingOverlay {
 /// Prefer this over walking keyboard focus: floating sheets stay open when Esc is
 /// pressed before anything inside them is focused.
 pub fn close_visible_dialog(window: &impl IsA<ApplicationWindow>) -> bool {
-    window
-        .visible_dialog()
-        .is_some_and(|dialog| dialog.close())
+    window.visible_dialog().is_some_and(|dialog| dialog.close())
 }
 
 /// Whether `target` is the floating-sheet dimming (outside the sheet content).
@@ -225,10 +223,11 @@ fn find_css_named(root: &Widget, name: &str) -> Option<Widget> {
 /// Base CSS for every [`FloatingOverlay`]. Installed with the app chrome CSS.
 pub fn overlay_css() -> &'static str {
     r#"
-    floating-sheet:has(.walltag-overlay) > dimming {
+    /* Avoid :has(); GTK theme CSS does not accept that pseudoclass here. */
+    floating-sheet > dimming {
       background-color: alpha(black, 0.32);
     }
-    floating-sheet:has(.walltag-overlay) > sheet {
+    floating-sheet > sheet {
       background-color: @window_bg_color;
       color: @window_fg_color;
     }

@@ -99,8 +99,8 @@ fn chrome_scale_css(scale: f32) -> String {
         .walltag-sidebar {{
             margin-top: {m8};
             margin-bottom: {m8};
-            margin-start: {m12};
-            margin-end: {m10};
+            margin-left: {m12};
+            margin-right: {m10};
             transition: margin 200ms ease;
         }}
         .walltag-sidebar-edit {{
@@ -139,8 +139,8 @@ fn chrome_scale_css(scale: f32) -> String {
             border-radius: {r8};
             margin-top: {m0};
             margin-bottom: {m0};
-            margin-start: {m4};
-            margin-end: {m4};
+            margin-left: {m4};
+            margin-right: {m4};
             transition: opacity 180ms ease, margin 180ms ease;
         }}
         .walltag-sidebar row > box.header {{
@@ -167,8 +167,8 @@ fn chrome_scale_css(scale: f32) -> String {
             min-width: {ctrl_h};
             padding-top: {m3};
             padding-bottom: {m3};
-            padding-start: {p12};
-            padding-end: {p12};
+            padding-left: {p12};
+            padding-right: {p12};
         }}
         .walltag-sidebar preferencesgroup.walltag-shared-tags > box {{
             border-spacing: {sp2};

@@ -899,6 +899,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
                 for tag in shared {
                     let row = ActionRow::builder()
                         .title(tag.clone())
+                        .use_markup(false)
                         .activatable(false)
                         .build();
                     let remove = Button::builder()
@@ -1163,8 +1164,10 @@ fn apply_exclusive_toggle(
 
 fn check_row(title: &str, check: &CheckButton) -> ActionRow {
     check.set_valign(gtk4::Align::Center);
+    // Folder and tag names are plain text; markup would treat `&` as an entity.
     let row = ActionRow::builder()
         .title(title)
+        .use_markup(false)
         .activatable_widget(check)
         .build();
     row.add_suffix(check);
