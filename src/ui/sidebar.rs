@@ -10,10 +10,7 @@ use gtk4::{
     RevealerTransitionType, ScrolledWindow, SearchEntry, StringList, Widget,
 };
 use libadwaita::prelude::*;
-use libadwaita::{
-    ActionRow, ComboRow, Dialog, DialogPresentationMode, EntryRow, ExpanderRow, PreferencesGroup,
-    SpinRow,
-};
+use libadwaita::{ActionRow, ComboRow, EntryRow, ExpanderRow, PreferencesGroup, SpinRow};
 
 use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy, SortBy};
 use crate::metadata::parse_tag_input;
@@ -25,6 +22,7 @@ use crate::ui::gallery::{
     assign_tags, remove_tags, set_favorite, set_random_wallpaper, GalleryModel, GalleryView,
 };
 use crate::ui::masonry::MasonryGrid;
+use crate::ui::overlay::FloatingOverlay;
 
 const ALL_MONITORS: &str = "All monitors";
 const ALL_TAGS: &str = "All tags";
@@ -116,19 +114,11 @@ impl Sidebar {
         anim_group.add(&fps_row);
         anim_group.add(&angle_row);
 
-        let anim_body = Box::new(Orientation::Vertical, 0);
-        anim_body.add_css_class("walltag-sidebar");
-        anim_body.add_css_class("walltag-awww-dialog-body");
-        anim_body.append(&anim_group);
-
-        let anim_dialog = Dialog::builder()
-            .title("Animation")
+        let anim_overlay = FloatingOverlay::builder("Animation")
             .content_width(300)
-            .follows_content_size(true)
-            .presentation_mode(DialogPresentationMode::Floating)
-            .child(&anim_body)
+            .body_class("walltag-sidebar")
+            .child(&anim_group)
             .build();
-        anim_dialog.add_css_class("walltag-awww-dialog");
 
         let anim_btn = Button::builder()
             .icon_name("preferences-system-symbolic")
@@ -136,12 +126,7 @@ impl Sidebar {
             .valign(Align::Center)
             .css_classes(["flat"])
             .build();
-        {
-            let anim_dialog = anim_dialog.clone();
-            anim_btn.connect_clicked(move |btn| {
-                anim_dialog.present(Some(btn));
-            });
-        }
+        anim_overlay.bind_trigger(&anim_btn);
         let awww_selected = config.borrow().backend == BackendKind::Awww;
         anim_btn.set_visible(awww_selected);
 
@@ -207,13 +192,13 @@ impl Sidebar {
         {
             let config = config.clone();
             let anim_btn = anim_btn.clone();
-            let anim_dialog = anim_dialog.clone();
+            let anim_overlay = anim_overlay.clone();
             backend_row.connect_selected_notify(move |row| {
                 let Some(kind) = BackendKind::ALL.get(row.selected() as usize).copied() else {
                     return;
                 };
                 if kind != BackendKind::Awww {
-                    anim_dialog.force_close();
+                    anim_overlay.force_close();
                 }
                 reveal_widget(&anim_btn, kind == BackendKind::Awww);
                 update(&config, |cfg| cfg.backend = kind);
@@ -452,6 +437,9 @@ fn build_search_section(
 
     let folder_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
     let rebuilding = Rc::new(Cell::new(false));
+    // Available folders plus the checked ids. Search refreshes the gallery often; the
+    // checklist is rebuilt only when this pair changes.
+    let shown: Rc<RefCell<Option<(Vec<String>, Vec<String>)>>> = Rc::new(RefCell::new(None));
 
     let rebuild_filters: Rc<dyn Fn()> = {
         let folder_row = folder_row.clone();
@@ -460,6 +448,7 @@ fn build_search_section(
         let gallery = gallery.clone();
         let config = config.clone();
         let rebuilding = rebuilding.clone();
+        let shown = shown.clone();
         Rc::new(move || {
             let entries = model.entries().borrow().clone();
             let current = model.filter().borrow().folders.clone();
@@ -482,6 +471,11 @@ fn build_search_section(
             }
             let selected = if pruned != current { pruned } else { current };
             folder_row.set_subtitle(&folder_filter_summary(&selected));
+            let signature = (folders.clone(), selected.clone());
+            if shown.borrow().as_ref() == Some(&signature) {
+                return;
+            }
+            *shown.borrow_mut() = Some(signature);
             let items: Vec<(String, String)> = folders
                 .iter()
                 .map(|folder| (folder.clone(), folder_label(folder)))
@@ -491,12 +485,16 @@ fn build_search_section(
                 let model = model.clone();
                 let config = config.clone();
                 let folder_row = folder_row.clone();
+                let shown = shown.clone();
                 move |selected| {
                     folder_row.set_subtitle(&folder_filter_summary(&selected));
                     if model.filter().borrow().folders == selected {
                         return;
                     }
                     model.filter().borrow_mut().folders = selected.clone();
+                    if let Some((_, picked)) = shown.borrow_mut().as_mut() {
+                        *picked = selected.clone();
+                    }
                     update(&config, |cfg| cfg.filter_folders = selected);
                     refresh_soon(&gallery);
                 }
@@ -952,7 +950,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
 /// Rebuilds the gallery on the next idle turn so a check handler can finish first.
 fn refresh_soon(gallery: &Rc<GalleryView>) {
     let gallery = Rc::clone(gallery);
-    glib::idle_add_local_once(move || gallery.refresh(true));
+    let _ = glib::idle_add_local_once(move || gallery.refresh(true));
 }
 
 /// Applies `change` to the shared config and writes it to disk.

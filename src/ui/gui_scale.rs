@@ -190,11 +190,9 @@ fn chrome_scale_css(scale: f32) -> String {
             min-width: {icon20};
             min-height: {icon20};
         }}
-        .walltag-sidebar.walltag-awww-dialog-body {{
-            margin-top: {m8};
-            margin-bottom: {m12};
-            margin-start: {m12};
-            margin-end: {m12};
+        .walltag-overlay-body {{
+            margin: 0;
+            padding: {m6};
             min-width: {dialog_w};
         }}
         row.combo popover.menu > contents {{
@@ -220,6 +218,7 @@ fn chrome_scale_css(scale: f32) -> String {
         m1 = px(1.0, s),
         m3 = px(3.0, s),
         m4 = px(4.0, s),
+        m6 = px(6.0, s),
         m8 = px(8.0, s),
         m10 = px(10.0, s),
         m12 = px(12.0, s),

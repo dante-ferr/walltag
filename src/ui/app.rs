@@ -21,6 +21,7 @@ use crate::config::{sidebar_limits, ConfigPaths};
 use crate::metadata::MetadataStore;
 use crate::scan::scan_wallpapers;
 use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryView};
+use crate::ui::overlay::overlay_css;
 use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
 use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
 use crate::ui::sidebar::Sidebar;
@@ -535,7 +536,7 @@ fn wire_persist_zoom(config: Rc<RefCell<AppConfig>>, grid: &MasonryGrid) {
 
 fn install_embedded_css(app: &Application) {
     let provider = CssProvider::new();
-    provider.load_from_string(default_app_css());
+    provider.load_from_string(&format!("{}{}", default_app_css(), overlay_css()));
     gtk4::style_context_add_provider_for_display(
         &Display::default().expect("default display"),
         &provider,

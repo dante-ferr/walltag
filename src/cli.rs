@@ -63,10 +63,7 @@ impl Cli {
 
     pub fn ensure_wallpaper_root(config: &AppConfig) -> Result<()> {
         fs::create_dir_all(&config.wallpaper_root).with_context(|| {
-            format!(
-                "create wallpaper root {}",
-                config.wallpaper_root.display()
-            )
+            format!("create wallpaper root {}", config.wallpaper_root.display())
         })?;
         Ok(())
     }

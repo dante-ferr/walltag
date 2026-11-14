@@ -731,19 +731,6 @@ pub fn default_app_css() -> &'static str {
       padding-top: 0.214em;
       padding-bottom: 0.214em;
     }
-    /* Centered floating animation dialog: one window surface, no padded frame. */
-    .walltag-awww-dialog {
-      background-color: @window_bg_color;
-    }
-    .walltag-sidebar.walltag-awww-dialog-body {
-      margin: 0.5em 0.857em 0.857em 0.857em;
-      background: transparent;
-    }
-    .walltag-awww-dialog-body preferencesgroup > box > list,
-    .walltag-awww-dialog-body preferencesgroup list.boxed-list {
-      background-color: alpha(@window_fg_color, 0.045);
-      border: 1px solid alpha(@window_fg_color, 0.06);
-    }
     /* Dropdown rows: the selected value and arrow never get a hover chip. */
     row.combo > box.header > box.suffixes listview,
     row.combo > box.header > box.suffixes listview > row,

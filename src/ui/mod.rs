@@ -6,6 +6,7 @@ mod filter;
 mod gallery;
 mod gui_scale;
 mod masonry;
+mod overlay;
 mod sidebar;
 mod theming;
 mod thumbs;

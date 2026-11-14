@@ -142,7 +142,11 @@ pub fn average_rgb(
         let row = pixels.get(y * rowstride..)?;
         for x in 0..width {
             let px = row.get(x * channels..x * channels + channels)?;
-            let a = if channels >= 4 { px[3] as f64 / 255.0 } else { 1.0 };
+            let a = if channels >= 4 {
+                px[3] as f64 / 255.0
+            } else {
+                1.0
+            };
             r += px[0] as f64 * a;
             g += px[1] as f64 * a;
             b += px[2] as f64 * a;
@@ -251,8 +255,16 @@ mod tests {
     #[test]
     fn group_hue_uses_circular_mean() {
         // 350° and 10° average to 0°, not 180°.
-        let a = AvgColor { hue: 350.0, saturation: 0.8, lightness: 0.5 };
-        let b = AvgColor { hue: 10.0, saturation: 0.8, lightness: 0.5 };
+        let a = AvgColor {
+            hue: 350.0,
+            saturation: 0.8,
+            lightness: 0.5,
+        };
+        let b = AvgColor {
+            hue: 10.0,
+            saturation: 0.8,
+            lightness: 0.5,
+        };
         match group_hue_key([Some(&a), Some(&b)]) {
             HueKey::Chromatic(h) => assert!(h < 1.0 || h > 359.0, "hue {h}"),
             other => panic!("unexpected {other:?}"),

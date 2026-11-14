@@ -575,7 +575,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn legacy_group_by_and_folder_load_as_lists() {
         let folder: AppConfig = serde_json::from_str(
             r#"{"wallpaper_root":"/x","group_by":"folder","filter_folder":"cats"}"#,
@@ -627,6 +626,7 @@ mod tests {
         assert!(err.is_err());
     }
 
+    #[test]
     fn awww_options_round_trip() {
         let mut cfg = AppConfig::default();
         cfg.monitor = Some("DP-1".into());

@@ -19,10 +19,7 @@ pub struct WallpaperEntry {
 
 pub fn scan_wallpapers(root: &Path) -> Result<Vec<WallpaperEntry>> {
     if !root.exists() {
-        anyhow::bail!(
-            "wallpaper root does not exist: {}",
-            root.display()
-        );
+        anyhow::bail!("wallpaper root does not exist: {}", root.display());
     }
     let root = root
         .canonicalize()
@@ -41,9 +38,7 @@ pub fn scan_wallpapers(root: &Path) -> Result<Vec<WallpaperEntry>> {
         let relative = absolute
             .strip_prefix(&root)
             .context("path outside wallpaper root")?;
-        let relative_key = relative
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative_key = relative.to_string_lossy().replace('\\', "/");
         let file_name = relative
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

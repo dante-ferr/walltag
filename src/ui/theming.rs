@@ -20,12 +20,8 @@ pub fn load_custom_css(display: &Display, css_path: &Path) -> Result<()> {
 fn apply_css_file(display: &Display, css_path: &Path) -> Result<()> {
     let provider = CssProvider::new();
     provider.load_from_path(css_path);
-    gtk4::style_context_add_provider_for_display(
-        display,
-        &provider,
-        STYLE_PROVIDER_PRIORITY_USER,
-    );
-  tracing::info!("Loaded custom CSS from {}", css_path.display());
+    gtk4::style_context_add_provider_for_display(display, &provider, STYLE_PROVIDER_PRIORITY_USER);
+    tracing::info!("Loaded custom CSS from {}", css_path.display());
     Ok(())
 }
 

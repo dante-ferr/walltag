@@ -40,8 +40,8 @@ impl MetadataStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
         let data = if path.exists() {
-            let raw = fs::read_to_string(&path)
-                .with_context(|| format!("read {}", path.display()))?;
+            let raw =
+                fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
             serde_json::from_str(&raw).context("parse wallpaper metadata.json")?
         } else {
             MetadataFile::new()
@@ -62,11 +62,7 @@ impl MetadataStore {
     }
 
     pub fn record_for_key(&self, key: &str) -> WallpaperRecord {
-        self.data
-            .wallpapers
-            .get(key)
-            .cloned()
-            .unwrap_or_default()
+        self.data.wallpapers.get(key).cloned().unwrap_or_default()
     }
 
     pub fn set_tags(&mut self, key: impl Into<String>, tags: Vec<String>) {
@@ -115,7 +111,11 @@ impl MetadataStore {
     /// Sets the favorite flag on every wallpaper in `keys`.
     pub fn set_favorite(&mut self, keys: &[String], favorite: bool) {
         for key in keys {
-            self.data.wallpapers.entry(key.clone()).or_default().favorite = favorite;
+            self.data
+                .wallpapers
+                .entry(key.clone())
+                .or_default()
+                .favorite = favorite;
         }
     }
 
@@ -154,8 +154,7 @@ impl MetadataStore {
 
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         let pretty =
             serde_json::to_string_pretty(&self.data).context("serialize wallpaper metadata")?;
@@ -203,8 +202,14 @@ mod tests {
         store.save().unwrap();
 
         let reopened = MetadataStore::open(&path).unwrap();
-        assert_eq!(reopened.record_for_key("a.png").tags, vec!["dark", "forest"]);
-        assert_eq!(reopened.record_for_key("sub/b.png").tags, vec!["dark", "forest"]);
+        assert_eq!(
+            reopened.record_for_key("a.png").tags,
+            vec!["dark", "forest"]
+        );
+        assert_eq!(
+            reopened.record_for_key("sub/b.png").tags,
+            vec!["dark", "forest"]
+        );
     }
 
     #[test]
@@ -246,6 +251,9 @@ mod tests {
         store.set_favorite(&["a.png".into()], true);
         store.set_favorite(&["b.png".into()], false);
         assert_eq!(store.shared_favorite(&["a.png".into()]), Some(true));
-        assert_eq!(store.shared_favorite(&["a.png".into(), "b.png".into()]), None);
+        assert_eq!(
+            store.shared_favorite(&["a.png".into(), "b.png".into()]),
+            None
+        );
     }
 }

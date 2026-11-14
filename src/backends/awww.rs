@@ -70,7 +70,10 @@ mod tests {
 
     #[test]
     fn passes_transition_flags() {
-        let args = build_args(Path::new("/a.png"), &options(AwwwTransitionKind::Grow, None));
+        let args = build_args(
+            Path::new("/a.png"),
+            &options(AwwwTransitionKind::Grow, None),
+        );
         let joined = args.join(" ");
         assert!(joined.contains("--transition-type grow"));
         assert!(joined.contains("--transition-duration 1.50"));
