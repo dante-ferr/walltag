@@ -24,7 +24,11 @@ pub const DEFAULT_ZOOM: f32 = 1.0;
 /// Returns the zoom after one step in or out, clamped to `MIN_ZOOM..=MAX_ZOOM`. A result
 /// within 1% of 100% snaps to exactly 100% so zooming in and out returns to the default.
 pub fn step_zoom(zoom: f32, zoom_in: bool) -> f32 {
-    let next = if zoom_in { zoom * ZOOM_STEP } else { zoom / ZOOM_STEP };
+    let next = if zoom_in {
+        zoom * ZOOM_STEP
+    } else {
+        zoom / ZOOM_STEP
+    };
     let next = next.clamp(MIN_ZOOM, MAX_ZOOM);
     if (next - DEFAULT_ZOOM).abs() < 0.01 {
         DEFAULT_ZOOM
@@ -133,9 +137,8 @@ impl Layout {
 
     /// Hit-test wallpaper tiles only (section headers are ignored).
     pub fn hit(&self, x: f64, y: f64) -> Option<usize> {
-        (0..self.rects.len()).find(|&i| {
-            !self.is_header(i) && self.cell(i).is_some_and(|c| c.contains(x, y))
-        })
+        (0..self.rects.len())
+            .find(|&i| !self.is_header(i) && self.cell(i).is_some_and(|c| c.contains(x, y)))
     }
 
     /// Indices of wallpaper tiles that overlap the rectangle spanned by two corner points.
@@ -169,16 +172,25 @@ pub enum ClickAction {
     Activate,
     /// Add the tile to the edit batch, or remove it if it is already there.
     Toggle,
+    /// Select only this tile, clearing any other selected tiles.
+    SelectOnly,
     /// Empty the edit batch.
     ClearSelection,
     Ignore,
 }
 
 /// Decides the effect of a click. The wallpaper is set only by a primary-button click on a
-/// tile while the edit batch is empty.
-pub fn click_action(button: u32, on_tile: bool, batch_empty: bool) -> ClickAction {
+/// tile while the edit batch is empty. Secondary click selects only the tile unless Shift or
+/// Control is held, in which case the tile is toggled in the existing batch.
+pub fn click_action(
+    button: u32,
+    on_tile: bool,
+    batch_empty: bool,
+    extend_selection: bool,
+) -> ClickAction {
     match (button, on_tile) {
-        (BUTTON_SECONDARY, true) => ClickAction::Toggle,
+        (BUTTON_SECONDARY, true) if extend_selection => ClickAction::Toggle,
+        (BUTTON_SECONDARY, true) => ClickAction::SelectOnly,
         (BUTTON_PRIMARY, true) if batch_empty => ClickAction::Activate,
         (BUTTON_PRIMARY, true) => ClickAction::Toggle,
         (BUTTON_PRIMARY, false) if !batch_empty => ClickAction::ClearSelection,
@@ -193,6 +205,8 @@ struct Drag {
     current: (f64, f64),
     button: u32,
     active: bool,
+    /// Shift or Control held at press time (secondary click adds to the batch).
+    extend_selection: bool,
 }
 
 impl Drag {
@@ -224,12 +238,7 @@ pub fn compute_layout(aspects: &[f32], width: i32) -> Layout {
 /// Like `compute_layout`, with the target column width scaled by `zoom` and a
 /// `label_height` strip reserved under every image (0 for none).
 #[allow(dead_code)]
-pub fn compute_layout_zoomed(
-    aspects: &[f32],
-    width: i32,
-    zoom: f32,
-    label_height: i32,
-) -> Layout {
+pub fn compute_layout_zoomed(aspects: &[f32], width: i32, zoom: f32, label_height: i32) -> Layout {
     let flags: Vec<bool> = aspects.iter().map(|_| false).collect();
     compute_layout_with_headers(aspects, &flags, width, zoom, label_height)
 }
@@ -602,7 +611,8 @@ mod imp {
                 _ => HashSet::new(),
             };
             let accent = self.accent();
-            let with_alpha = |alpha: f32| gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
+            let with_alpha =
+                |alpha: f32| gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
 
             if !self.selected.borrow().is_empty() || !preview.is_empty() {
                 let selected = self.selected.borrow();
@@ -731,9 +741,9 @@ mod imp {
                 return;
             }
             let layout = self.layout_for(width);
-            let (old_value, old_upper, page) = adj
-                .as_ref()
-                .map_or((0.0, 0.0, 1.0), |a| (a.value(), a.upper(), a.page_size().max(1.0)));
+            let (old_value, old_upper, page) = adj.as_ref().map_or((0.0, 0.0, 1.0), |a| {
+                (a.value(), a.upper(), a.page_size().max(1.0))
+            });
             let upper = (layout.height as f64).max(page);
             let value = scroll_target(mode, old_value, old_upper, page, layout.height);
             let moves = !(matches!(mode, ScrollMode::Top) && old_value > 0.5);
@@ -781,9 +791,17 @@ mod imp {
                 y: r.y as f32,
                 w: r.w as f32,
                 h: r.h as f32,
-                lh: if header { 0.0 } else { layout.label_height as f32 },
+                lh: if header {
+                    0.0
+                } else {
+                    layout.label_height as f32
+                },
                 a: 1.0,
-                la: if header || self.show_names.get() { 1.0 } else { 0.0 },
+                la: if header || self.show_names.get() {
+                    1.0
+                } else {
+                    0.0
+                },
             }
         }
 
@@ -923,10 +941,11 @@ mod imp {
                 return;
             }
             let weak = self.obj().downgrade();
-            self.obj().add_tick_callback(move |_, clock| match weak.upgrade() {
-                Some(obj) => obj.imp().tick(clock.frame_time()),
-                None => glib::ControlFlow::Break,
-            });
+            self.obj()
+                .add_tick_callback(move |_, clock| match weak.upgrade() {
+                    Some(obj) => obj.imp().tick(clock.frame_time()),
+                    None => glib::ControlFlow::Break,
+                });
         }
 
         fn tick(&self, now: i64) -> glib::ControlFlow {
@@ -1007,8 +1026,14 @@ mod imp {
                 None => (0.0, 1.0),
             };
 
-            let near = (value - page * REALIZE_PAD, value + page + page * REALIZE_PAD);
-            let far = (value - page * RECYCLE_PAD, value + page + page * RECYCLE_PAD);
+            let near = (
+                value - page * REALIZE_PAD,
+                value + page + page * REALIZE_PAD,
+            );
+            let far = (
+                value - page * RECYCLE_PAD,
+                value + page + page * RECYCLE_PAD,
+            );
 
             // A tile stays while either its drawn or its final position is near the view.
             let stale: Vec<String> = self
@@ -1016,7 +1041,8 @@ mod imp {
                 .borrow()
                 .iter()
                 .filter(|(_, t)| {
-                    let drawn = overlaps(t.cur.y as f64, (t.cur.y + t.cur.h + t.cur.lh) as f64, far);
+                    let drawn =
+                        overlaps(t.cur.y as f64, (t.cur.y + t.cur.h + t.cur.lh) as f64, far);
                     let target = t
                         .idx
                         .and_then(|i| layout.cell(i))
@@ -1035,7 +1061,9 @@ mod imp {
             let ids = self.ids.borrow().clone();
             let mut added = false;
             for idx in 0..layout.rects.len() {
-                let Some(cell) = layout.cell(idx) else { continue };
+                let Some(cell) = layout.cell(idx) else {
+                    continue;
+                };
                 if !overlaps(cell.y as f64, cell.bottom() as f64, near) {
                     continue;
                 }
@@ -1075,10 +1103,15 @@ mod imp {
             tile.cancel.store(true, Ordering::Relaxed);
             tile.cancel = Arc::new(AtomicBool::new(false));
             tile.thumb_px = px;
-            self.thumbs
-                .request(&item.path, px, item.natural_width, tile.cancel.clone(), move |tex| {
+            self.thumbs.request(
+                &item.path,
+                px,
+                item.natural_width,
+                tile.cancel.clone(),
+                move |tex| {
                     picture.set_paintable(Some(tex));
-                });
+                },
+            );
         }
 
         fn acquire(&self, id: &str, idx: usize, item: &GridItem, layout: &Layout) {
@@ -1130,7 +1163,10 @@ mod imp {
                     p
                 });
                 picture.set_parent(&*self.obj());
-                let label = self.show_names.get().then(|| self.new_label(&item.file_name));
+                let label = self
+                    .show_names
+                    .get()
+                    .then(|| self.new_label(&item.file_name));
                 Tile {
                     key: item.key.clone(),
                     picture: Some(picture),
@@ -1202,9 +1238,7 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::ObjectSubclassIsExt;
 use std::collections::HashSet;
 
-use gtk4::{
-    gdk, glib, Adjustment, EventControllerScroll, EventControllerScrollFlags, GestureDrag,
-};
+use gtk4::{glib, Adjustment, GestureDrag};
 
 glib::wrapper! {
     /// Vertically scrolling masonry of image tiles with zero spacing.
@@ -1245,11 +1279,15 @@ impl MasonryGrid {
                 gesture.set_state(gtk4::EventSequenceState::Denied);
                 return;
             }
+            let state = gesture.current_event_state();
+            let extend_selection = state.contains(gtk4::gdk::ModifierType::CONTROL_MASK)
+                || state.contains(gtk4::gdk::ModifierType::SHIFT_MASK);
             grid.imp().drag.set(Some(Drag {
                 start: (x, y),
                 current: (x, y),
                 button,
                 active: false,
+                extend_selection,
             }));
         });
         let weak = grid.downgrade();
@@ -1270,7 +1308,9 @@ impl MasonryGrid {
         let weak = grid.downgrade();
         drag.connect_drag_end(move |_, dx, dy| {
             let Some(grid) = weak.upgrade() else { return };
-            let Some(mut d) = grid.imp().drag.take() else { return };
+            let Some(mut d) = grid.imp().drag.take() else {
+                return;
+            };
             d.current = (d.start.0 + dx, d.start.1 + dy);
             grid.finish_press(d);
         });
@@ -1282,31 +1322,6 @@ impl MasonryGrid {
             }
         });
         grid.add_controller(drag);
-
-        let scroll_zoom =
-            EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
-        let weak = grid.downgrade();
-        scroll_zoom.connect_scroll(move |controller, _dx, dy| {
-            let state = controller
-                .current_event()
-                .map(|e| e.modifier_state())
-                .unwrap_or(gdk::ModifierType::empty());
-            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
-            let super_ = state.contains(gdk::ModifierType::SUPER_MASK);
-            if !ctrl || super_ {
-                return glib::Propagation::Proceed;
-            }
-            let Some(grid) = weak.upgrade() else {
-                return glib::Propagation::Stop;
-            };
-            if dy < 0.0 {
-                grid.zoom_in();
-            } else if dy > 0.0 {
-                grid.zoom_out();
-            }
-            glib::Propagation::Stop
-        });
-        grid.add_controller(scroll_zoom);
 
         grid.set_has_tooltip(true);
         grid.connect_query_tooltip(|grid, x, y, _keyboard, tooltip| {
@@ -1459,6 +1474,24 @@ impl MasonryGrid {
         self.notify_selection();
     }
 
+    fn select_only(&self, key: &str) {
+        let changed = {
+            let mut selected = self.imp().selected.borrow_mut();
+            let already = selected.len() == 1 && selected.contains(key);
+            if already {
+                false
+            } else {
+                selected.clear();
+                selected.insert(key.to_owned());
+                true
+            }
+        };
+        if changed {
+            self.queue_draw();
+            self.notify_selection();
+        }
+    }
+
     /// Handles the end of a press: a drag adds the enclosed tiles to the edit batch, a
     /// click follows `click_action`.
     fn finish_press(&self, d: Drag) {
@@ -1490,7 +1523,7 @@ impl MasonryGrid {
 
         let item = self.item_at(d.current.0, d.current.1);
         let batch_empty = imp.selected.borrow().is_empty();
-        match click_action(d.button, item.is_some(), batch_empty) {
+        match click_action(d.button, item.is_some(), batch_empty, d.extend_selection) {
             ClickAction::Activate => {
                 let callback = imp.on_activate.borrow().clone();
                 if let (Some(callback), Some(item)) = (callback, item) {
@@ -1500,6 +1533,11 @@ impl MasonryGrid {
             ClickAction::Toggle => {
                 if let Some(item) = item {
                     self.toggle_selected(&item.key);
+                }
+            }
+            ClickAction::SelectOnly => {
+                if let Some(item) = item {
+                    self.select_only(&item.key);
                 }
             }
             ClickAction::ClearSelection => self.clear_selection(),
@@ -1584,16 +1622,17 @@ mod tests {
             assert!(a.bottom() <= labeled.height);
             for j in i + 1..labeled.rects.len() {
                 let b = labeled.cell(j).unwrap();
-                let apart = a.x + a.w <= b.x
-                    || b.x + b.w <= a.x
-                    || a.bottom() <= b.y
-                    || b.bottom() <= a.y;
+                let apart =
+                    a.x + a.w <= b.x || b.x + b.w <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;
                 assert!(apart, "{a:?} overlaps {b:?}");
             }
         }
         // The label strip counts as part of the tile for hit testing.
         let r = labeled.rects[0];
-        assert_eq!(labeled.hit(r.x as f64 + 1.0, (r.y + r.h + 5) as f64), Some(0));
+        assert_eq!(
+            labeled.hit(r.x as f64 + 1.0, (r.y + r.h + 5) as f64),
+            Some(0)
+        );
         assert_eq!(plain.hit(r.x as f64 + 1.0, (r.y + r.h + 5) as f64), None);
     }
 
@@ -1655,7 +1694,8 @@ mod tests {
         let layout = compute_layout(&aspects(), 1100);
         for (i, a) in layout.rects.iter().enumerate() {
             for b in &layout.rects[i + 1..] {
-                let apart = a.x + a.w <= b.x || b.x + b.w <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;
+                let apart =
+                    a.x + a.w <= b.x || b.x + b.w <= a.x || a.bottom() <= b.y || b.bottom() <= a.y;
                 assert!(apart, "{a:?} overlaps {b:?}");
             }
         }
@@ -1712,12 +1752,7 @@ mod tests {
         );
         assert_eq!(hits, vec![0]);
         // Corner order does not matter.
-        let all = layout.hit_rect(
-            layout.width as f64,
-            layout.height as f64,
-            0.0,
-            0.0,
-        );
+        let all = layout.hit_rect(layout.width as f64, layout.height as f64, 0.0, 0.0);
         assert_eq!(all.len(), layout.rects.len());
         assert!(layout.hit_rect(-10.0, -10.0, -1.0, -1.0).is_empty());
     }
@@ -1732,14 +1767,18 @@ mod tests {
 
     #[test]
     fn wallpaper_applies_only_on_primary_click_with_empty_batch() {
-        assert_eq!(click_action(1, true, true), ClickAction::Activate);
-        assert_eq!(click_action(1, true, false), ClickAction::Toggle);
-        assert_eq!(click_action(3, true, true), ClickAction::Toggle);
-        assert_eq!(click_action(3, true, false), ClickAction::Toggle);
-        assert_eq!(click_action(1, false, false), ClickAction::ClearSelection);
-        assert_eq!(click_action(1, false, true), ClickAction::Ignore);
-        assert_eq!(click_action(3, false, false), ClickAction::Ignore);
-        assert_eq!(click_action(2, true, true), ClickAction::Ignore);
+        assert_eq!(click_action(1, true, true, false), ClickAction::Activate);
+        assert_eq!(click_action(1, true, false, false), ClickAction::Toggle);
+        assert_eq!(click_action(3, true, true, false), ClickAction::SelectOnly);
+        assert_eq!(click_action(3, true, false, false), ClickAction::SelectOnly);
+        assert_eq!(click_action(3, true, false, true), ClickAction::Toggle);
+        assert_eq!(
+            click_action(1, false, false, false),
+            ClickAction::ClearSelection
+        );
+        assert_eq!(click_action(1, false, true, false), ClickAction::Ignore);
+        assert_eq!(click_action(3, false, false, false), ClickAction::Ignore);
+        assert_eq!(click_action(2, true, true, false), ClickAction::Ignore);
     }
 
     #[test]
@@ -1749,6 +1788,7 @@ mod tests {
             current: (12.0, 12.0),
             button: 1,
             active: false,
+            extend_selection: false,
         };
         assert!(!d.moved_past_threshold());
         d.current = (10.0, 17.0);
@@ -1782,12 +1822,31 @@ mod tests {
 
     #[test]
     fn vis_lerp_interpolates_every_field() {
-        let a = Vis { x: 0.0, y: 10.0, w: 100.0, h: 50.0, lh: 0.0, a: 0.0, la: 0.0 };
-        let b = Vis { x: 20.0, y: 30.0, w: 200.0, h: 150.0, lh: 20.0, a: 1.0, la: 1.0 };
+        let a = Vis {
+            x: 0.0,
+            y: 10.0,
+            w: 100.0,
+            h: 50.0,
+            lh: 0.0,
+            a: 0.0,
+            la: 0.0,
+        };
+        let b = Vis {
+            x: 20.0,
+            y: 30.0,
+            w: 200.0,
+            h: 150.0,
+            lh: 20.0,
+            a: 1.0,
+            la: 1.0,
+        };
         assert_eq!(a.lerp(b, 0.0), a);
         assert_eq!(a.lerp(b, 1.0), b);
         let m = a.lerp(b, 0.5);
-        assert_eq!((m.x, m.y, m.w, m.h, m.lh, m.a, m.la), (10.0, 20.0, 150.0, 100.0, 10.0, 0.5, 0.5));
+        assert_eq!(
+            (m.x, m.y, m.w, m.h, m.lh, m.a, m.la),
+            (10.0, 20.0, 150.0, 100.0, 10.0, 0.5, 0.5)
+        );
     }
 
     #[test]
@@ -1818,13 +1877,31 @@ mod tests {
 
     #[test]
     fn scroll_target_clamps_to_content() {
-        assert_eq!(scroll_target(ScrollMode::Top, 500.0, 2000.0, 600.0, 3000), 0.0);
-        assert_eq!(scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 3000), 500.0);
+        assert_eq!(
+            scroll_target(ScrollMode::Top, 500.0, 2000.0, 600.0, 3000),
+            0.0
+        );
+        assert_eq!(
+            scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 3000),
+            500.0
+        );
         // Content shrinks below the offset: clamp to the new maximum.
-        assert_eq!(scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 800), 200.0);
+        assert_eq!(
+            scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 800),
+            200.0
+        );
         // Content shorter than the viewport: no scrolling.
-        assert_eq!(scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 300), 0.0);
-        assert_eq!(scroll_target(ScrollMode::Relative(0.5), 0.0, 2000.0, 600.0, 3000), 1500.0);
-        assert_eq!(scroll_target(ScrollMode::Relative(0.9), 0.0, 2000.0, 600.0, 1000), 400.0);
+        assert_eq!(
+            scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 300),
+            0.0
+        );
+        assert_eq!(
+            scroll_target(ScrollMode::Relative(0.5), 0.0, 2000.0, 600.0, 3000),
+            1500.0
+        );
+        assert_eq!(
+            scroll_target(ScrollMode::Relative(0.9), 0.0, 2000.0, 600.0, 1000),
+            400.0
+        );
     }
 }
