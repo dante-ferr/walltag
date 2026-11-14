@@ -5,6 +5,7 @@
 //! `walltag-overlay` / `walltag-overlay-body` CSS classes from [`overlay_css`].
 
 use gtk4::glib::object::IsA;
+use gtk4::prelude::GtkWindowExt;
 use gtk4::prelude::*;
 use gtk4::{Box, Button, Orientation, Widget};
 use libadwaita::prelude::*;
@@ -133,6 +134,44 @@ impl FloatingOverlay {
             overlay.present(btn);
         });
     }
+
+    /// Dismisses this overlay when Esc is pressed inside [`Self::body`].
+    ///
+    /// Capture phase runs before a focused [`gtk4::SearchEntry`] handles Escape
+    /// (that binding emits `stop-search` and consumes the key, so the dialog's
+    /// own Escape shortcut never runs).
+    pub fn wire_escape_to_close(&self) {
+        let overlay = self.clone();
+        let key = gtk4::EventControllerKey::new();
+        key.set_propagation_phase(gtk4::PropagationPhase::Capture);
+        key.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk4::gdk::Key::Escape {
+                overlay.force_close();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        self.body.add_controller(key);
+    }
+}
+
+/// Closes the [`Dialog`] that contains keyboard focus, if any.
+///
+/// Call from the main window's Esc handler (capture phase) so a focused
+/// [`gtk4::SearchEntry`] inside a floating sheet dismisses the overlay instead of
+/// only clearing focus.
+pub fn close_focused_dialog(window: &impl IsA<gtk4::Window>) -> bool {
+    let Some(focus) = window.focus() else {
+        return false;
+    };
+    let mut current = Some(focus);
+    while let Some(widget) = current {
+        if let Ok(dialog) = widget.clone().downcast::<Dialog>() {
+            return dialog.close();
+        }
+        current = widget.parent();
+    }
+    false
 }
 
 /// Base CSS for every [`FloatingOverlay`]. Installed with the app chrome CSS.

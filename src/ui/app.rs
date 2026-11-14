@@ -23,7 +23,7 @@ use crate::scan::scan_wallpapers;
 use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryView};
 use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
 use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
-use crate::ui::overlay::overlay_css;
+use crate::ui::overlay::{close_focused_dialog, overlay_css};
 use crate::ui::sidebar::Sidebar;
 use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
@@ -357,6 +357,9 @@ fn wire_clear_selection(window: &ApplicationWindow, grid: &MasonryGrid) {
         let grid = grid.clone();
         key.connect_key_pressed(move |_, keyval, _, _| {
             if keyval == gtk4::gdk::Key::Escape {
+                if close_focused_dialog(&window) {
+                    return gtk4::glib::Propagation::Stop;
+                }
                 clear_focus_and_selection(&window, &grid);
             }
             gtk4::glib::Propagation::Proceed

@@ -119,6 +119,7 @@ impl Sidebar {
             .body_class("walltag-sidebar")
             .child(&anim_group)
             .build();
+        anim_overlay.wire_escape_to_close();
 
         let anim_btn = Button::builder()
             .icon_name("preferences-system-symbolic")
@@ -451,6 +452,16 @@ fn build_search_section(
             folder_search.grab_focus();
         });
     }
+    folder_overlay.wire_escape_to_close();
+    // SearchEntry consumes Escape (stop-search) inside the dialog focus scope, so
+    // the window-level Esc handler never sees it. Close from that signal as well.
+    folder_search.connect_stop_search({
+        let overlay = folder_overlay.clone();
+        move |_| {
+            let overlay = overlay.clone();
+            glib::idle_add_local_once(move || overlay.force_close());
+        }
+    });
     folder_overlay.dialog().connect_closed({
         let folder_search = folder_search.clone();
         move |_| {
@@ -601,6 +612,7 @@ fn build_gallery_section(
         .child(&group_list)
         .build();
     group_overlay.bind_trigger(&group_open);
+    group_overlay.wire_escape_to_close();
 
     let group_items = [
         (
