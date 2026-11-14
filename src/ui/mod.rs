@@ -1,6 +1,7 @@
 mod app;
 mod cache_paths;
 mod color;
+mod color_cache;
 mod dim_cache;
 mod filter;
 mod gallery;

@@ -7,7 +7,7 @@ use gtk4::gdk::Display;
 use gtk4::gio;
 use gtk4::prelude::{ButtonExt, GtkWindowExt};
 use gtk4::{
-    Align, Box as GtkBox, Button, CheckButton, CssProvider, DropDown, Editable, EventControllerKey,
+    Box as GtkBox, Button, CheckButton, CssProvider, DropDown, Editable, EventControllerKey,
     FileDialog, GestureClick, ListBoxRow, Orientation, Paned, PickFlags, Popover, PropagationPhase,
     Scale, Scrollbar, SpinButton, Switch, ToggleButton, Widget, STYLE_PROVIDER_PRIORITY_USER,
 };
@@ -192,14 +192,23 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
         });
     }
 
+    let refresh_folder = Button::builder()
+        .icon_name("view-refresh-symbolic")
+        .tooltip_text("Rescan wallpaper folder")
+        .css_classes(["flat", "circular", "walltag-topbar-btn"])
+        .build();
+    {
+        let gallery = gallery.clone();
+        refresh_folder.connect_clicked(move |_| GalleryView::rescan(&gallery));
+    }
+
     let top = HeaderBar::new();
     top.add_css_class("walltag-topbar");
     top.set_show_end_title_buttons(true);
     top.set_title_widget(Some(&GtkBox::new(Orientation::Horizontal, 0)));
     top.pack_start(&sidebar_toggle);
+    top.pack_start(&refresh_folder);
     top.pack_end(&build_zoom_controls(&gallery.grid));
-    gallery.spinner.set_valign(Align::Center);
-    top.pack_end(&gallery.spinner);
 
     split.set_end_child(Some(&gallery.root));
 

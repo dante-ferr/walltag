@@ -90,7 +90,8 @@ fn chrome_scale_css(scale: f32) -> String {
             font-size: {zoom_font};
         }}
         .walltag-loading {{
-            margin-end: {m4};
+            min-width: {spinner};
+            min-height: {spinner};
         }}
         .walltag-sidebar-shell {{
             font-size: {font};
@@ -262,6 +263,7 @@ fn chrome_scale_css(scale: f32) -> String {
         sw_h = px(26.0, s),
         check = px(18.0, s),
         menu_row = px(32.0, s),
+        spinner = px(35.0, s),
     )
 }
 

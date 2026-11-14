@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use gtk4::gdk_pixbuf::Pixbuf;
+use serde::{Deserialize, Serialize};
 
 /// Thumbnails are decoded to fit in a square of this many pixels before averaging.
 const SAMPLE_SIZE: i32 = 32;
@@ -13,7 +14,7 @@ const SAMPLE_THREADS: usize = 4;
 pub const NEUTRAL_SATURATION: f32 = 0.12;
 
 /// Average color of an image in HSL. `hue` is in degrees, `0.0..360.0`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct AvgColor {
     pub hue: f32,
     pub saturation: f32,

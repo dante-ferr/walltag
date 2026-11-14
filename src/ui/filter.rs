@@ -104,8 +104,8 @@ pub struct FileStat {
 }
 
 /// Per-wallpaper data the sort modes need, keyed by `relative_key`. Stats come from one
-/// `stat` per file at scan time. Average colors are sampled lazily the first time the
-/// hue sort is used and stay cached until the file changes or the folder is rescanned.
+/// `stat` per file at scan time. Average colors are sampled the first time the hue sort
+/// needs them and reused from the on-disk color cache when size and mtime still match.
 #[derive(Debug, Clone, Default)]
 pub struct SortData {
     pub stats: HashMap<String, FileStat>,
@@ -115,12 +115,14 @@ pub struct SortData {
 }
 
 impl SortData {
-    /// Entries with no cached average color that are still worth sampling.
+    /// Entries that have a stat, and no cached color, and are still worth sampling.
+    /// Files without a stat are skipped so a sample can be stored against size and mtime.
     pub fn missing_colors(&self, entries: &[WallpaperEntry]) -> Vec<(String, PathBuf)> {
         entries
             .iter()
             .filter(|e| {
-                !self.colors.contains_key(&e.relative_key)
+                self.stats.contains_key(&e.relative_key)
+                    && !self.colors.contains_key(&e.relative_key)
                     && !self.unreadable.contains(&e.relative_key)
             })
             .map(|e| (e.relative_key.clone(), e.absolute.clone()))
@@ -144,10 +146,15 @@ impl SortData {
     /// Replaces the stats and keeps cached colors only for files whose stat is unchanged.
     pub fn replace_stats(&mut self, stats: HashMap<String, FileStat>) {
         let old = std::mem::take(&mut self.stats);
-        self.unreadable.clear();
-        self.colors.retain(
-            |key, _| matches!((old.get(key), stats.get(key)), (Some(a), Some(b)) if a == b),
-        );
+        // Keep colors loaded from disk before this process had stats (`None` old stat).
+        // Drop them when the file changed or left the folder.
+        let keep = |key: &String| match (old.get(key), stats.get(key)) {
+            (Some(a), Some(b)) => a == b,
+            (None, Some(_)) => true,
+            _ => false,
+        };
+        self.unreadable.retain(&keep);
+        self.colors.retain(|key, _| keep(key));
         self.stats = stats;
     }
 
@@ -754,6 +761,27 @@ mod tests {
         d.replace_stats(next);
         assert!(d.colors.contains_key("same.png"));
         assert!(!d.colors.contains_key("edited.png"));
+    }
+
+    #[test]
+    fn replace_stats_keeps_colors_loaded_before_any_stat() {
+        let mut d = SortData::default();
+        d.colors.insert("kept.png".into(), hued(10.0));
+        d.unreadable.insert("bad.png".into());
+        let mut next = HashMap::new();
+        next.insert("kept.png".to_owned(), stat(1, 10));
+        next.insert("bad.png".to_owned(), stat(1, 10));
+        next.insert("new.png".to_owned(), stat(1, 10));
+        d.replace_stats(next);
+        assert!(d.colors.contains_key("kept.png"));
+        assert!(d.unreadable.contains("bad.png"));
+        assert_eq!(
+            d.missing_colors(&[entry("new.png", "", "new.png")]).len(),
+            1
+        );
+        assert!(d
+            .missing_colors(&[entry("kept.png", "", "kept.png")])
+            .is_empty());
     }
 
     #[test]

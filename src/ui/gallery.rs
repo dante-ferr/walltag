@@ -3,13 +3,17 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{gio, glib, Box, Label, Orientation, PolicyType, ScrolledWindow, SearchEntry, Spinner};
-
+use gtk4::{
+    gio, glib, Align, Box, Label, Orientation, Overlay, PolicyType, ScrolledWindow, SearchEntry,
+    Spinner,
+};
 
 use crate::backends::ApplyOptions;
 use crate::metadata::MetadataStore;
+use crate::scan::scan_wallpapers;
 use crate::scan::WallpaperEntry;
 use crate::ui::color::probe_colors;
+use crate::ui::color_cache::{persist_color_samples, plan_and_prune, ColorCache};
 use crate::ui::dim_cache::{resolve_dimensions, DimensionCache};
 use crate::ui::filter::{build_rows, GalleryFilter, GalleryRow, SortBy, SortData};
 use crate::ui::gallery_scroll::{install_gallery_scroller, GalleryScroller};
@@ -79,28 +83,63 @@ impl GalleryModel {
         self.sort_data.clone()
     }
 
-    /// Samples average colors for entries that have none, when the hue sort is active.
-    /// Returns `true` if new colors were stored. Results are dropped when `generation`
-    /// no longer matches `current` (the folder was rescanned meanwhile).
+    /// Fills hue colors from the disk cache, then samples whatever is still missing.
+    /// Returns `true` when the in-memory colors changed. Results are dropped when
+    /// `generation` no longer matches `current` (the folder was rescanned meanwhile).
     async fn load_colors(&self, current: &Cell<u64>, generation: u64) -> bool {
         if self.filter.borrow().sort_by != SortBy::Hue {
             return false;
         }
-        let missing = self
-            .sort_data
-            .borrow()
-            .missing_colors(&self.entries.borrow());
-        if missing.is_empty() {
+        if self.sort_data.borrow().stats.is_empty() {
             return false;
         }
-        let input = missing.clone();
-        let Ok(found) = gio::spawn_blocking(move || probe_colors(input)).await else {
+        let root = self.config.borrow().wallpaper_root.clone();
+        let items: Vec<_> = self
+            .entries
+            .borrow()
+            .iter()
+            .map(|e| (e.relative_key.clone(), e.absolute.clone()))
+            .collect();
+        let stats = self.sort_data.borrow().stats.clone();
+        let root_for_plan = root.clone();
+        let Ok(plan) =
+            gio::spawn_blocking(move || plan_and_prune(&root_for_plan, &items, &stats)).await
+        else {
             return false;
         };
         if current.get() != generation {
             return false;
         }
-        self.sort_data.borrow_mut().record_colors(&missing, found);
+        let misses = plan.misses.clone();
+        let changed = {
+            let data = self.sort_data.borrow();
+            data.colors != plan.colors || data.unreadable != plan.unreadable
+        };
+        {
+            let mut data = self.sort_data.borrow_mut();
+            data.colors = plan.colors;
+            data.unreadable = plan.unreadable;
+        }
+        if misses.is_empty() {
+            return changed;
+        }
+        let input = misses.clone();
+        let Ok(found) = gio::spawn_blocking(move || probe_colors(input)).await else {
+            return changed;
+        };
+        if current.get() != generation {
+            return false;
+        }
+        self.sort_data
+            .borrow_mut()
+            .record_colors(&misses, found.clone());
+        let stats = self.sort_data.borrow().stats.clone();
+        let found_for_save = found;
+        let requested = misses;
+        let _ = gio::spawn_blocking(move || {
+            persist_color_samples(&root, &stats, &requested, &found_for_save);
+        })
+        .await;
         true
     }
 }
@@ -111,8 +150,8 @@ pub struct GalleryView {
     pub search: SearchEntry,
     pub grid: MasonryGrid,
     scroller: GalleryScroller,
-    /// Shown in the window top bar while scans or hue sampling run.
-    pub spinner: Spinner,
+    /// Centered over the gallery while scans or hue sampling run.
+    spinner: Spinner,
     model: GalleryModel,
     dimensions: Dimensions,
     generation: Rc<Cell<u64>>,
@@ -138,6 +177,10 @@ impl GalleryView {
         let spinner = Spinner::new();
         spinner.set_tooltip_text(Some("Loading…"));
         spinner.add_css_class("walltag-loading");
+        spinner.set_halign(Align::Center);
+        spinner.set_valign(Align::Center);
+        // Clicks pass through so blank-space clear still works under the wheel.
+        spinner.set_can_target(false);
         spinner.set_visible(false);
 
         let scroll = ScrolledWindow::builder()
@@ -149,7 +192,13 @@ impl GalleryView {
         let grid = MasonryGrid::new(&scroll.vadjustment());
         scroll.set_child(Some(&grid));
         let scroller = install_gallery_scroller(&scroll);
-        root.append(&scroll);
+
+        let overlay = Overlay::new();
+        overlay.set_vexpand(true);
+        overlay.set_hexpand(true);
+        overlay.set_child(Some(&scroll));
+        overlay.add_overlay(&spinner);
+        root.append(&overlay);
 
         let view = Self {
             root,
@@ -205,13 +254,13 @@ impl GalleryView {
         self.notify_repopulated();
 
         let needs_colors = self.model.filter.borrow().sort_by == SortBy::Hue
-            && self
+            && !self.model.sort_data.borrow().stats.is_empty()
+            && !self
                 .model
                 .sort_data
                 .borrow()
                 .missing_colors(&self.model.entries.borrow())
-                .len()
-                > 0;
+                .is_empty();
         if !needs_colors {
             return;
         }
@@ -312,6 +361,12 @@ impl GalleryView {
         }
         self.model.set_entries(entries);
         *self.dimensions.borrow_mut() = DimensionCache::load(&root).unvalidated();
+        if self.model.filter.borrow().sort_by == SortBy::Hue {
+            let (colors, unreadable) = ColorCache::load(&root).unvalidated();
+            let mut data = self.model.sort_data.borrow_mut();
+            data.colors = colors;
+            data.unreadable = unreadable;
+        }
         populate(&self.grid, &self.model, &self.dimensions.borrow(), true);
         self.notify_repopulated();
 
@@ -353,6 +408,34 @@ impl GalleryView {
                     cb();
                 }
             }
+        });
+    }
+
+    /// Rescans the wallpaper root and reloads the gallery, keeping Browse filters.
+    /// New files are sampled for the hue sort; unchanged files reuse the color cache.
+    pub fn rescan(view: &Rc<Self>) {
+        view.clear_empty_banner();
+        view.set_busy(true);
+        let view = Rc::clone(view);
+        let busy = view.busy.clone();
+        let spinner = view.spinner.clone();
+        let root = view.model.config().borrow().wallpaper_root.clone();
+        glib::spawn_future_local(async move {
+            let scanned = gio::spawn_blocking(move || scan_wallpapers(&root)).await;
+            let entries = match scanned {
+                Ok(Ok(entries)) => entries,
+                Ok(Err(err)) => {
+                    tracing::warn!("Scan failed: {err:#}");
+                    Vec::new()
+                }
+                Err(_) => {
+                    end_busy(&busy, &spinner);
+                    return;
+                }
+            };
+            view.reload_from_scan(entries, false);
+            end_busy(&busy, &spinner);
+            view.show_empty_banner(&view.model.config().borrow());
         });
     }
 
@@ -555,7 +638,12 @@ pub fn set_random_wallpaper(model: &GalleryModel) -> Option<String> {
     let entry = candidates[seed % candidates.len()].clone();
     let cfg = model.config().borrow().clone();
     let options = ApplyOptions::from_config(&cfg);
-    apply_wallpaper_async(cfg, entry.absolute.clone(), options, entry.relative_key.clone());
+    apply_wallpaper_async(
+        cfg,
+        entry.absolute.clone(),
+        options,
+        entry.relative_key.clone(),
+    );
     Some(entry.relative_key)
 }
 
@@ -650,7 +738,8 @@ pub fn default_app_css() -> &'static str {
       letter-spacing: 0.02em;
     }
     .walltag-loading {
-      margin-end: 0.286em;
+      min-width: 2.5em;
+      min-height: 2.5em;
     }
     .walltag-thumb {
       background: alpha(@window_fg_color, 0.06);
