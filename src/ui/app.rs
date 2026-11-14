@@ -212,8 +212,8 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Walltag")
-        .default_width(1100)
-        .default_height(720)
+        .default_width(1080)
+        .default_height(960)
         .content(&toast_overlay)
         .build();
 
