@@ -54,6 +54,18 @@ Set log verbosity with `RUST_LOG`, for example `RUST_LOG=walltag=debug`.
 
 **Browse** has the wallpaper folder button, filename search, folder filter, and random pick. **Output** has monitor, backend, post command, and awww animation controls. **Gallery** has group-by, sort, tag filter, and file-name labels. **Edit** assigns tags to the selected tiles (right-click or drag).
 
+## Arch Linux (AUR)
+
+Packaging lives in `packaging/aur/`. See [packaging/aur/README.md](packaging/aur/README.md) for maintainer steps (tag, checksums, first upload).
+
+After the package is published:
+
+```bash
+git clone https://aur.archlinux.org/walltag.git
+cd walltag
+makepkg -si
+```
+
 ## Status
 
 Working MVP: masonry gallery, portable metadata, swww/awww backends, `--restore`, `post_command`, multi-select tagging, and folder/tag grouping.

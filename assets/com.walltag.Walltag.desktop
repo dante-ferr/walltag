@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Walltag
+Comment=Minimalist wallpaper manager and visual gallery for Wayland
+Exec=walltag
+Icon=com.walltag.Walltag
+Terminal=false
+Categories=Graphics;GTK;
+StartupNotify=true

@@ -1,0 +1,20 @@
+pkgbase = walltag
+	pkgdesc = Minimalist wallpaper manager and visual gallery for Linux/Wayland
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://github.com/dante-ferr/walltag
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	makedepends = rustc
+	depends = gtk4
+	depends = libadwaita
+	depends = gcc-libs
+	optdepends = swww: swww wallpaper backend
+	optdepends = awww: awww wallpaper backend
+	options = !debug
+	source = walltag-0.1.0.tar.gz::https://github.com/dante-ferr/walltag/archive/refs/tags/v0.1.0.tar.gz
+	sha256sums = 0000000000000000000000000000000000000000000000000000000000000000
+
+pkgname = walltag
