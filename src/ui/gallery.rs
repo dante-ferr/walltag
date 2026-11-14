@@ -34,10 +34,10 @@ impl GalleryModel {
             let cfg = config.borrow();
             GalleryFilter {
                 query: cfg.search_query.clone(),
-                group_by: cfg.group_by,
+                group_by: cfg.group_by.clone(),
                 sort_by: cfg.sort_by,
                 tag: cfg.filter_tag.clone(),
-                folder: cfg.filter_folder.clone(),
+                folders: cfg.filter_folders.clone(),
             }
         };
         Self {
@@ -84,7 +84,10 @@ impl GalleryModel {
         if self.filter.borrow().sort_by != SortBy::Hue {
             return false;
         }
-        let missing = self.sort_data.borrow().missing_colors(&self.entries.borrow());
+        let missing = self
+            .sort_data
+            .borrow()
+            .missing_colors(&self.entries.borrow());
         if missing.is_empty() {
             return false;
         }
@@ -284,14 +287,14 @@ impl GalleryView {
                 let mut filter = self.model.filter.borrow_mut();
                 filter.query.clear();
                 filter.tag = None;
-                filter.folder = None;
+                filter.folders.clear();
             }
             {
                 let config = self.model.config();
                 let mut cfg = config.borrow_mut();
                 cfg.search_query.clear();
                 cfg.filter_tag = None;
-                cfg.filter_folder = None;
+                cfg.filter_folders.clear();
                 if let Err(err) = crate::ConfigPaths::save(&cfg) {
                     tracing::error!("Failed to save config: {err:#}");
                 }
@@ -497,7 +500,11 @@ fn refresh_tooltips(
     keys: &[String],
 ) {
     let entries = model.entries();
-    for entry in entries.borrow().iter().filter(|e| keys.contains(&e.relative_key)) {
+    for entry in entries
+        .borrow()
+        .iter()
+        .filter(|e| keys.contains(&e.relative_key))
+    {
         let record = metadata.record_for_key(&entry.relative_key);
         grid.update_tooltip(
             &entry.relative_key,
@@ -558,8 +565,7 @@ pub fn wire_activate(grid: &MasonryGrid, model: &GalleryModel) {
         };
         let cfg = config.borrow();
         let options = ApplyOptions::from_config(&cfg);
-        if let Err(err) = crate::backends::apply_wallpaper(cfg.backend, &entry.absolute, &options)
-        {
+        if let Err(err) = crate::backends::apply_wallpaper(cfg.backend, &entry.absolute, &options) {
             tracing::error!("Failed to set wallpaper: {err:#}");
             return;
         }
@@ -642,20 +648,25 @@ pub fn default_app_css() -> &'static str {
         transparent 100%
       );
     }
-    /* Sidebar chrome: inset groups, roomy section titles, compact rows. */
+    /* Sidebar chrome: inset groups, compact section titles and rows. */
     .walltag-sidebar {
       background: transparent;
-      margin: 0.857em 1em 0.857em 1.143em;
+      margin: 0.571em 0.714em 0.571em 0.857em;
+      transition: margin 200ms ease;
+    }
+    .walltag-sidebar-edit {
+      transition: opacity 200ms ease, margin 200ms ease;
     }
     .walltag-sidebar preferencesgroup > box {
-      border-spacing: 0.571em;
+      border-spacing: 0.429em;
+      transition: border-spacing 200ms ease;
     }
     /* Section titles sit inset from the pane edge instead of flush left. */
     .walltag-sidebar preferencesgroup > box > box.header,
     .walltag-sidebar preferencesgroup > box > box:first-child {
       margin-left: 0.286em;
       margin-right: 0.286em;
-      margin-bottom: 0.143em;
+      margin-bottom: 0.071em;
     }
     .walltag-sidebar preferencesgroup > box > box > label.heading {
       font-size: 0.72em;
@@ -663,7 +674,7 @@ pub fn default_app_css() -> &'static str {
       letter-spacing: 0.06em;
       text-transform: uppercase;
       color: alpha(@window_fg_color, 0.55);
-      padding: 0.143em 0.286em 0 0.286em;
+      padding: 0.071em 0.286em 0 0.286em;
     }
     .walltag-sidebar preferencesgroup > box > box > label.subtitle,
     .walltag-sidebar preferencesgroup > box label.subtitle {
@@ -677,25 +688,27 @@ pub fn default_app_css() -> &'static str {
       background-color: alpha(@window_fg_color, 0.045);
       border: 1px solid alpha(@window_fg_color, 0.06);
       border-radius: 0.857em;
-      padding: 0.143em 0;
-      margin-top: 0.143em;
+      padding: 0.071em 0;
+      margin-top: 0.071em;
+      transition: margin 200ms ease, padding 200ms ease;
     }
     .walltag-sidebar row {
       min-height: 0;
       background: transparent;
       border-radius: 0.571em;
-      margin: 0.071em 0.286em;
+      margin: 0 0.286em;
+      transition: opacity 180ms ease, margin 180ms ease;
     }
     .walltag-sidebar row:hover {
       background-color: alpha(@window_fg_color, 0.05);
     }
     .walltag-sidebar row > box.header {
-      min-height: 2.571em;
-      padding: 0 0.857em;
-      border-spacing: 0.714em;
+      min-height: 2.286em;
+      padding: 0 0.714em;
+      border-spacing: 0.571em;
     }
     .walltag-sidebar row > box.header > box.title {
-      margin: 0.286em 0;
+      margin: 0.214em 0;
     }
     .walltag-sidebar row > box.header > box.title > label.title {
       font-weight: 500;
@@ -704,19 +717,32 @@ pub fn default_app_css() -> &'static str {
       min-height: 0;
     }
     .walltag-sidebar row.entry > box.header {
-      padding: 0 0.857em;
+      padding: 0 0.714em;
     }
     .walltag-sidebar row.spin > box.header {
-      min-height: 2.571em;
+      min-height: 2.286em;
     }
     .walltag-sidebar row > box.header > box.suffixes button.pill {
       min-height: 0;
-      padding: 0.286em 1em;
+      padding: 0.214em 0.857em;
     }
     .walltag-sidebar row > box.header > box.suffixes entry {
       min-height: 0;
       padding-top: 0.214em;
       padding-bottom: 0.214em;
+    }
+    /* Centered floating animation dialog: one window surface, no padded frame. */
+    .walltag-awww-dialog {
+      background-color: @window_bg_color;
+    }
+    .walltag-sidebar.walltag-awww-dialog-body {
+      margin: 0.5em 0.857em 0.857em 0.857em;
+      background: transparent;
+    }
+    .walltag-awww-dialog-body preferencesgroup > box > list,
+    .walltag-awww-dialog-body preferencesgroup list.boxed-list {
+      background-color: alpha(@window_fg_color, 0.045);
+      border: 1px solid alpha(@window_fg_color, 0.06);
     }
     /* Dropdown rows: the selected value and arrow never get a hover chip. */
     row.combo > box.header > box.suffixes listview,

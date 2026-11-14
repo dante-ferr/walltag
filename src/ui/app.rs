@@ -3,11 +3,6 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::Result;
-use libadwaita::prelude::*;
-use libadwaita::{
-    Application, ApplicationWindow, EntryRow, HeaderBar, SpinRow, StyleManager, ToastOverlay,
-    ToolbarView,
-};
 use gtk4::gdk::Display;
 use gtk4::gio;
 use gtk4::prelude::{ButtonExt, GtkWindowExt};
@@ -16,14 +11,19 @@ use gtk4::{
     FileDialog, GestureClick, ListBoxRow, Orientation, Paned, PickFlags, Popover, PropagationPhase,
     Scale, Scrollbar, SpinButton, Switch, ToggleButton, Widget, STYLE_PROVIDER_PRIORITY_USER,
 };
+use libadwaita::prelude::*;
+use libadwaita::{
+    Application, ApplicationWindow, Dialog, EntryRow, ExpanderRow, HeaderBar, SpinRow,
+    StyleManager, ToastOverlay, ToolbarView,
+};
 
 use crate::config::{sidebar_limits, ConfigPaths};
 use crate::metadata::MetadataStore;
 use crate::scan::scan_wallpapers;
-use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
-use crate::ui::sidebar::Sidebar;
 use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryView};
 use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
+use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
+use crate::ui::sidebar::Sidebar;
 use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
 
@@ -225,14 +225,12 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     window.add_action(&toggle_action);
     app.set_accels_for_action("win.toggle-sidebar", &["F9"]);
 
-    wire_zoom_actions(app, &window, &gallery.grid);
-    let gui_scale_provider =
-        install_scale_provider(&Display::default().expect("default display"));
+    let gui_scale_provider = install_scale_provider(&Display::default().expect("default display"));
     wire_gui_scale(
-        app,
         &window,
-        &[sidebar.widget.clone(), top.upcast()],
-        Some(&sidebar.content),
+        gallery.root.upcast_ref(),
+        &gallery.grid,
+        &[sidebar.content.clone(), sidebar.edit_content.clone()],
         &sidebar.widget,
         &split,
         config.clone(),
@@ -292,17 +290,17 @@ fn animate_paned_position(split: &Paned, target: i32, animating: &Rc<Cell<bool>>
 fn build_zoom_controls(grid: &MasonryGrid) -> GtkBox {
     let out = Button::builder()
         .icon_name("zoom-out-symbolic")
-        .tooltip_text("Zoom out (Ctrl+-)")
+        .tooltip_text("Gallery zoom out (Ctrl+- over gallery)")
         .css_classes(["flat", "walltag-topbar-btn"])
         .build();
     let reset = Button::builder()
         .label("100")
-        .tooltip_text("Reset zoom (Ctrl+0)")
+        .tooltip_text("Reset gallery zoom (Ctrl+0 over gallery)")
         .css_classes(["flat", "walltag-zoom-label"])
         .build();
     let zoom_in = Button::builder()
         .icon_name("zoom-in-symbolic")
-        .tooltip_text("Zoom in (Ctrl++)")
+        .tooltip_text("Gallery zoom in (Ctrl++ over gallery)")
         .css_classes(["flat", "walltag-topbar-btn"])
         .build();
 
@@ -336,41 +334,6 @@ fn build_zoom_controls(grid: &MasonryGrid) -> GtkBox {
         zoom_in.connect_clicked(move |_| grid.zoom_in());
     }
     controls
-}
-
-/// Ctrl+`+`, Ctrl+`=`, and Ctrl+numpad plus zoom in; Ctrl+`-` and Ctrl+numpad minus zoom
-/// out; Ctrl+`0` resets.
-fn wire_zoom_actions(app: &Application, window: &ApplicationWindow, grid: &MasonryGrid) {
-    type Handler = fn(&MasonryGrid);
-    let actions: [(&str, &[&str], Handler); 3] = [
-        (
-            "zoom-in",
-            &[
-                "<Control>plus",
-                "<Control>equal",
-                "<Control><Shift>equal",
-                "<Control>KP_Add",
-            ],
-            MasonryGrid::zoom_in,
-        ),
-        (
-            "zoom-out",
-            &["<Control>minus", "<Control>KP_Subtract"],
-            MasonryGrid::zoom_out,
-        ),
-        (
-            "zoom-reset",
-            &["<Control>0", "<Control>KP_0"],
-            MasonryGrid::reset_zoom,
-        ),
-    ];
-    for (name, accels, handler) in actions {
-        let action = gio::SimpleAction::new(name, None);
-        let grid = grid.clone();
-        action.connect_activate(move |_, _| handler(&grid));
-        window.add_action(&action);
-        app.set_accels_for_action(&format!("win.{name}"), accels);
-    }
 }
 
 /// Clears selection and drops keyboard focus from inputs. Add any new selectable state
@@ -431,8 +394,8 @@ fn is_inside(widget: &Widget, ancestor: &Widget) -> bool {
     widget == ancestor || widget.is_ancestor(ancestor)
 }
 
-/// Whether a press on `target` belongs to a control (button, entry, row, scrollbar,
-/// popover, or the sidebar divider) instead of blank space.
+/// Whether a press on `target` belongs to a control (button, entry, row, expander,
+/// scrollbar, popover, or the sidebar divider) instead of blank space.
 fn is_interactive(target: &Widget) -> bool {
     if target.is::<Paned>() {
         // The only part of the `Paned` itself that can be hit is its divider.
@@ -449,9 +412,12 @@ fn is_interactive(target: &Widget) -> bool {
             || w.is::<SpinButton>()
             || w.is::<DropDown>()
             || w.is::<Popover>()
+            || w.is::<Dialog>()
             || w.is::<EntryRow>()
             || w.is::<SpinRow>()
-            || w.downcast_ref::<ListBoxRow>().is_some_and(|row| row.is_activatable());
+            || w.is::<ExpanderRow>()
+            || w.downcast_ref::<ListBoxRow>()
+                .is_some_and(|row| row.is_activatable());
         if control {
             return true;
         }
@@ -556,15 +522,13 @@ fn wire_persist_zoom(config: Rc<RefCell<AppConfig>>, grid: &MasonryGrid) {
         }
         let config = config.clone();
         let slot = pending.clone();
-        let id = gtk4::glib::timeout_add_local_once(
-            std::time::Duration::from_millis(400),
-            move || {
+        let id =
+            gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
                 slot.borrow_mut().take();
                 if let Err(err) = ConfigPaths::save(&config.borrow()) {
                     tracing::error!("Failed to save config: {err:#}");
                 }
-            },
-        );
+            });
         *pending.borrow_mut() = Some(id);
     });
 }

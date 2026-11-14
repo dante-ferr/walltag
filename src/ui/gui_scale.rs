@@ -3,22 +3,25 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gtk4::gdk::Key;
 use gtk4::gdk::{Display, ModifierType};
 use gtk4::glib;
+use gtk4::prelude::DeviceExt;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GtkBox, CssProvider, EventControllerScroll, EventControllerScrollFlags, Paned, Widget,
-    STYLE_PROVIDER_PRIORITY_USER,
+    Box as GtkBox, CssProvider, EventControllerKey, EventControllerScroll,
+    EventControllerScrollFlags, Paned, PickFlags, Widget, STYLE_PROVIDER_PRIORITY_USER,
 };
-use libadwaita::{gio, Application, ApplicationWindow};
+use libadwaita::ApplicationWindow;
 
 use crate::config::{sidebar_limits, AppConfig, ConfigPaths};
+use crate::ui::masonry::MasonryGrid;
 
 pub const MIN_GUI_SCALE: f32 = 0.75;
 pub const MAX_GUI_SCALE: f32 = 1.75;
 const GUI_SCALE_STEP: f32 = 1.1;
 pub const DEFAULT_GUI_SCALE: f32 = 1.0;
-const SIDEBAR_SECTION_SPACING: i32 = 16;
+const SIDEBAR_SECTION_SPACING: i32 = 10;
 
 /// Returns the GUI scale after one step in or out, clamped and snapped near 100%.
 pub fn step_gui_scale(scale: f32, scale_up: bool) -> f32 {
@@ -63,14 +66,23 @@ fn chrome_scale_css(scale: f32) -> String {
         .walltag-topbar windowhandle,
         .walltag-topbar headerbar {{
             min-height: {top_h};
+            padding-left: {m4};
+            padding-right: {m4};
         }}
-        .walltag-topbar-btn {{
+        .walltag-topbar-btn,
+        .walltag-topbar windowcontrols button {{
             min-width: {btn};
             min-height: {btn};
             padding: {btn_pad};
         }}
-        .walltag-topbar-btn image {{
+        .walltag-topbar-btn image,
+        .walltag-topbar windowcontrols button image {{
             -gtk-icon-size: {icon};
+            min-width: {icon};
+            min-height: {icon};
+        }}
+        .walltag-topbar windowcontrols {{
+            border-spacing: {m4};
         }}
         .walltag-zoom-label {{
             min-width: {zoom_w};
@@ -84,19 +96,24 @@ fn chrome_scale_css(scale: f32) -> String {
             font-size: {font};
         }}
         .walltag-sidebar {{
-            margin-top: {m12};
-            margin-bottom: {m12};
-            margin-start: {m16};
-            margin-end: {m14};
+            margin-top: {m8};
+            margin-bottom: {m8};
+            margin-start: {m12};
+            margin-end: {m10};
+            transition: margin 200ms ease;
+        }}
+        .walltag-sidebar-edit {{
+            transition: opacity 200ms ease, margin 200ms ease;
         }}
         .walltag-sidebar preferencesgroup > box {{
-            border-spacing: {sp8};
+            border-spacing: {sp6};
+            transition: border-spacing 200ms ease;
         }}
         .walltag-sidebar preferencesgroup > box > box.header,
         .walltag-sidebar preferencesgroup > box > box:first-child {{
             margin-left: {m4};
             margin-right: {m4};
-            margin-bottom: {m2};
+            margin-bottom: {m1};
         }}
         .walltag-sidebar preferencesgroup > box > box > label.heading {{
             font-size: {heading};
@@ -108,50 +125,90 @@ fn chrome_scale_css(scale: f32) -> String {
         .walltag-sidebar preferencesgroup > box > list,
         .walltag-sidebar preferencesgroup list.boxed-list {{
             border-radius: {r12};
-            padding-top: {m2};
-            padding-bottom: {m2};
-            margin-top: {m2};
+            padding-top: {m4};
+            padding-bottom: {m4};
+            padding-left: {m1};
+            padding-right: {m1};
+            margin-top: {m4};
+            min-height: {row_h};
+            transition: margin 200ms ease, padding 200ms ease;
         }}
         .walltag-sidebar row {{
+            min-height: {row_h};
             border-radius: {r8};
-            margin-top: {m1};
-            margin-bottom: {m1};
+            margin-top: {m0};
+            margin-bottom: {m0};
             margin-start: {m4};
             margin-end: {m4};
+            transition: opacity 180ms ease, margin 180ms ease;
         }}
         .walltag-sidebar row > box.header {{
             min-height: {row_h};
-            padding-left: {pad12};
-            padding-right: {pad12};
-            border-spacing: {sp10};
+            padding-top: {m3};
+            padding-bottom: {m3};
+            padding-left: {pad10};
+            padding-right: {pad10};
+            border-spacing: {sp8};
         }}
         .walltag-sidebar row.spin > box.header {{
             min-height: {row_h};
         }}
         .walltag-sidebar row > box.header > box.title {{
-            margin-top: {m4};
-            margin-bottom: {m4};
+            margin-top: {m3};
+            margin-bottom: {m3};
         }}
         .walltag-sidebar row > box.header > box.title > label.title {{
             font-size: {body};
         }}
+        .walltag-sidebar row > box.header > box.suffixes button,
         .walltag-sidebar row > box.header > box.suffixes button.pill {{
-            padding-top: {m4};
-            padding-bottom: {m4};
-            padding-start: {p14};
-            padding-end: {p14};
+            min-height: {ctrl_h};
+            min-width: {ctrl_h};
+            padding-top: {m3};
+            padding-bottom: {m3};
+            padding-start: {p12};
+            padding-end: {p12};
         }}
-        .walltag-sidebar row > box.header > box.suffixes entry {{
+        .walltag-sidebar row > box.header > box.suffixes entry,
+        .walltag-sidebar entry,
+        .walltag-sidebar spinbutton {{
+            min-height: {ctrl_h};
             padding-top: {p3};
             padding-bottom: {p3};
+        }}
+        .walltag-sidebar switch {{
+            min-width: {sw_w};
+            min-height: {sw_h};
+        }}
+        .walltag-sidebar checkbutton,
+        .walltag-sidebar check {{
+            min-width: {check};
+            min-height: {check};
         }}
         .walltag-sidebar row.combo > box.header > box.suffixes image.dropdown-arrow {{
             -gtk-icon-size: {icon20};
             min-width: {icon20};
             min-height: {icon20};
         }}
-        "#
-        ,
+        .walltag-sidebar.walltag-awww-dialog-body {{
+            margin-top: {m8};
+            margin-bottom: {m12};
+            margin-start: {m12};
+            margin-end: {m12};
+            min-width: {dialog_w};
+        }}
+        row.combo popover.menu > contents {{
+            padding: {m4};
+        }}
+        row.combo popover.menu > contents listview > row,
+        row.combo popover.menu > contents listview > row > box {{
+            min-height: {menu_row};
+            padding-top: {m3};
+            padding-bottom: {m3};
+            padding-left: {pad10};
+            padding-right: {pad10};
+        }}
+        "#,
         font = px(14.0, s),
         top_h = px(28.0, s),
         btn = px(22.0, s),
@@ -159,53 +216,70 @@ fn chrome_scale_css(scale: f32) -> String {
         icon = px(16.0, s),
         zoom_w = px(24.0, s),
         zoom_font = px(9.8, s),
-        m4 = px(4.0, s),
-        m12 = px(12.0, s),
-        m14 = px(14.0, s),
-        m16 = px(16.0, s),
-        m2 = px(2.0, s),
+        m0 = px(0.0, s),
         m1 = px(1.0, s),
+        m3 = px(3.0, s),
+        m4 = px(4.0, s),
+        m8 = px(8.0, s),
+        m10 = px(10.0, s),
+        m12 = px(12.0, s),
+        sp6 = px(6.0, s),
         sp8 = px(8.0, s),
-        sp10 = px(10.0, s),
         heading = px(10.08, s),
         subtitle = px(11.9, s),
         r12 = px(12.0, s),
         r8 = px(8.0, s),
-        row_h = px(36.0, s),
-        pad12 = px(12.0, s),
+        row_h = px(32.0, s),
+        pad10 = px(10.0, s),
         body = px(14.0, s),
-        p14 = px(14.0, s),
+        p12 = px(12.0, s),
         p3 = px(3.0, s),
         icon20 = px(20.0, s),
+        dialog_w = px(260.0, s),
+        ctrl_h = px(28.0, s),
+        sw_w = px(46.0, s),
+        sw_h = px(26.0, s),
+        check = px(18.0, s),
+        menu_row = px(32.0, s),
     )
 }
 
 pub fn apply_gui_scale(
     provider: &CssProvider,
     scale: f32,
-    sidebar_content: Option<&GtkBox>,
+    previous: f32,
+    sidebar_contents: &[GtkBox],
     sidebar_widget: Option<&Widget>,
     split: Option<&Paned>,
 ) {
     let scale = scale.clamp(MIN_GUI_SCALE, MAX_GUI_SCALE);
+    let previous = previous.clamp(MIN_GUI_SCALE, MAX_GUI_SCALE);
     provider.load_from_string(&chrome_scale_css(scale));
-    if let Some(content) = sidebar_content {
-        content.set_spacing((SIDEBAR_SECTION_SPACING as f32 * scale).round() as i32);
+    let spacing = (SIDEBAR_SECTION_SPACING as f32 * scale).round() as i32;
+    for content in sidebar_contents {
+        content.set_spacing(spacing);
     }
     if let (Some(sidebar), Some(split)) = (sidebar_widget, split) {
-        sync_sidebar_paned_limits(scale, sidebar, split);
+        sync_sidebar_paned_limits(scale, previous, sidebar, split);
     }
 }
 
-/// GtkPaned size request and position clamps follow scaled chrome width.
-fn sync_sidebar_paned_limits(gui_scale: f32, sidebar: &Widget, split: &Paned) {
+/// GtkPaned size request follows the scaled minimum. An open sidebar's width scales
+/// with the chrome so the column grows and shrinks, not only its text.
+fn sync_sidebar_paned_limits(gui_scale: f32, previous: f32, sidebar: &Widget, split: &Paned) {
     let (min, max) = sidebar_limits(gui_scale);
     sidebar.set_size_request(min, -1);
     if split.shrinks_start_child() {
         return;
     }
     split.set_shrink_start_child(false);
-    let pos = split.position().clamp(min, max);
+    let ratio = if previous > f32::EPSILON {
+        gui_scale / previous
+    } else {
+        1.0
+    };
+    let pos = (split.position() as f32 * ratio).round() as i32;
+    let pos = pos.clamp(min, max);
     if split.position() != pos {
         split.set_position(pos);
     }
@@ -215,18 +289,33 @@ fn set_gui_scale(
     config: &Rc<RefCell<AppConfig>>,
     provider: &CssProvider,
     scale: f32,
-    sidebar_content: Option<&GtkBox>,
+    sidebar_contents: &[GtkBox],
     sidebar_widget: Option<&Widget>,
     split: Option<&Paned>,
     persist: &Rc<RefCell<Option<glib::SourceId>>>,
 ) {
     let scale = scale.clamp(MIN_GUI_SCALE, MAX_GUI_SCALE);
-    if (config.borrow().gui_scale - scale).abs() < f32::EPSILON {
-        apply_gui_scale(provider, scale, sidebar_content, sidebar_widget, split);
+    let previous = config.borrow().gui_scale;
+    if (previous - scale).abs() < f32::EPSILON {
+        apply_gui_scale(
+            provider,
+            scale,
+            previous,
+            sidebar_contents,
+            sidebar_widget,
+            split,
+        );
         return;
     }
     config.borrow_mut().gui_scale = scale;
-    apply_gui_scale(provider, scale, sidebar_content, sidebar_widget, split);
+    apply_gui_scale(
+        provider,
+        scale,
+        previous,
+        sidebar_contents,
+        sidebar_widget,
+        split,
+    );
     schedule_persist_gui_scale(config.clone(), persist);
 }
 
@@ -247,34 +336,143 @@ fn schedule_persist_gui_scale(
     *pending.borrow_mut() = Some(id);
 }
 
-fn wire_super_wheel(widget: &Widget, bump: Rc<dyn Fn(bool)>) {
+fn held_modifiers(controller: &EventControllerScroll) -> ModifierType {
+    let mut state = controller.current_event_state();
+    if let Some(event) = controller.current_event() {
+        state |= event.modifier_state();
+    }
+    if let Some(device) = controller.current_event_device() {
+        state |= device.modifier_state();
+    }
+    state
+}
+
+/// Widget under the pointer, in window coordinates. Scroll events can be grabbed by the
+/// focused gallery, so the event target is not the hover target.
+fn widget_under_pointer(window: &impl WidgetExt) -> Option<Widget> {
+    let pointer = window
+        .display()
+        .default_seat()
+        .and_then(|seat| seat.pointer())?;
+    let (surface, x, y) = pointer.surface_at_position();
+    let surface = surface?;
+    if window.native()?.surface().as_ref() != Some(&surface) {
+        return None;
+    }
+    window.pick(x, y, PickFlags::DEFAULT)
+}
+
+fn pointer_over(widget: &Widget, hovered: &Widget) -> bool {
+    hovered == widget || hovered.is_ancestor(widget)
+}
+
+fn step_by_wheel(dy: f64, bump: &Rc<dyn Fn(bool)>) {
+    if dy < 0.0 {
+        bump(true);
+    } else if dy > 0.0 {
+        bump(false);
+    }
+}
+
+fn pointer_over_gallery(window: &ApplicationWindow, gallery: &Widget) -> bool {
+    widget_under_pointer(window).is_some_and(|hovered| pointer_over(gallery, &hovered))
+}
+
+fn is_zoom_in_key(key: Key) -> bool {
+    matches!(key, Key::plus | Key::equal | Key::KP_Add)
+}
+
+fn is_zoom_out_key(key: Key) -> bool {
+    matches!(key, Key::minus | Key::KP_Subtract)
+}
+
+fn is_zoom_reset_key(key: Key) -> bool {
+    matches!(key, Key::_0 | Key::KP_0)
+}
+
+/// Ctrl+wheel on the gallery zooms tiles; elsewhere it scales chrome.
+fn wire_pointer_scroll(
+    window: &ApplicationWindow,
+    gallery: &Widget,
+    grid: &MasonryGrid,
+    bump_gui: Rc<dyn Fn(bool)>,
+) {
     let scroll = EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
     scroll.set_propagation_phase(gtk4::PropagationPhase::Capture);
-    widget.add_controller(scroll.clone());
+    window.add_controller(scroll.clone());
+    let window = window.clone();
+    let gallery = gallery.clone();
+    let grid = grid.clone();
     scroll.connect_scroll(move |controller, _dx, dy| {
-        let super_held = controller.current_event().is_some_and(|event| {
-            event
-                .modifier_state()
-                .contains(ModifierType::SUPER_MASK)
-        });
-        if !super_held {
+        if !held_modifiers(controller).contains(ModifierType::CONTROL_MASK) {
             return glib::Propagation::Proceed;
         }
-        if dy < 0.0 {
-            bump(true);
-        } else if dy > 0.0 {
-            bump(false);
+        if pointer_over_gallery(&window, &gallery) {
+            if dy < 0.0 {
+                grid.zoom_in();
+            } else if dy > 0.0 {
+                grid.zoom_out();
+            }
+        } else {
+            step_by_wheel(dy, &bump_gui);
         }
         glib::Propagation::Stop
     });
 }
 
-/// Super+wheel on the sidebar or top bar scales chrome; Super+`+` / Super+`-` work globally.
-pub fn wire_gui_scale(
-    app: &Application,
+/// Ctrl+`+` / Ctrl+`-` / Ctrl+`0` follow the same gallery-vs-chrome split as the wheel.
+fn wire_ctrl_scale_keys(
     window: &ApplicationWindow,
-    wheel_targets: &[Widget],
-    sidebar_content: Option<&GtkBox>,
+    gallery: &Widget,
+    grid: &MasonryGrid,
+    bump_gui: Rc<dyn Fn(bool)>,
+    reset_gui: Rc<dyn Fn()>,
+) {
+    let key = EventControllerKey::new();
+    key.set_propagation_phase(gtk4::PropagationPhase::Capture);
+    window.add_controller(key.clone());
+    let window = window.clone();
+    let gallery = gallery.clone();
+    let grid = grid.clone();
+    key.connect_key_pressed(move |_, keyval, _, modifiers| {
+        if !modifiers.contains(ModifierType::CONTROL_MASK) {
+            return glib::Propagation::Proceed;
+        }
+        let over_gallery = pointer_over_gallery(&window, &gallery);
+        if is_zoom_in_key(keyval) {
+            if over_gallery {
+                grid.zoom_in();
+            } else {
+                bump_gui(true);
+            }
+            return glib::Propagation::Stop;
+        }
+        if is_zoom_out_key(keyval) {
+            if over_gallery {
+                grid.zoom_out();
+            } else {
+                bump_gui(false);
+            }
+            return glib::Propagation::Stop;
+        }
+        if is_zoom_reset_key(keyval) {
+            if over_gallery {
+                grid.reset_zoom();
+            } else {
+                reset_gui();
+            }
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+}
+
+/// Ctrl+wheel and Ctrl+`+` / `-` / `0`: gallery zoom over the gallery, chrome scale elsewhere.
+pub fn wire_gui_scale(
+    window: &ApplicationWindow,
+    gallery: &Widget,
+    grid: &MasonryGrid,
+    sidebar_contents: &[GtkBox],
     sidebar_widget: &Widget,
     split: &Paned,
     config: Rc<RefCell<AppConfig>>,
@@ -284,7 +482,8 @@ pub fn wire_gui_scale(
     apply_gui_scale(
         provider,
         initial,
-        sidebar_content,
+        initial,
+        sidebar_contents,
         Some(sidebar_widget),
         Some(split),
     );
@@ -295,7 +494,7 @@ pub fn wire_gui_scale(
         let config = config.clone();
         let provider = provider.clone();
         let persist = persist.clone();
-        let sidebar = sidebar_content.cloned();
+        let sidebar_contents: Vec<GtkBox> = sidebar_contents.to_vec();
         let sidebar_widget = sidebar_widget.clone();
         let split = split.clone();
         Rc::new(move |up: bool| {
@@ -304,7 +503,7 @@ pub fn wire_gui_scale(
                 &config,
                 &provider,
                 next,
-                sidebar.as_ref(),
+                &sidebar_contents,
                 Some(&sidebar_widget),
                 Some(&split),
                 &persist,
@@ -312,35 +511,28 @@ pub fn wire_gui_scale(
         })
     };
 
-    for target in wheel_targets {
-        wire_super_wheel(target, bump.clone());
-    }
-
-    let zoom_in = gio::SimpleAction::new("gui-scale-in", None);
-    {
-        let bump = bump.clone();
-        zoom_in.connect_activate(move |_, _| bump(true));
-    }
-    let zoom_out = gio::SimpleAction::new("gui-scale-out", None);
-    {
-        let bump = bump.clone();
-        zoom_out.connect_activate(move |_, _| bump(false));
+    let reset_gui = {
+        let config = config.clone();
+        let provider = provider.clone();
+        let persist = persist.clone();
+        let sidebar_contents: Vec<GtkBox> = sidebar_contents.to_vec();
+        let sidebar_widget = sidebar_widget.clone();
+        let split = split.clone();
+        Rc::new(move || {
+            set_gui_scale(
+                &config,
+                &provider,
+                DEFAULT_GUI_SCALE,
+                &sidebar_contents,
+                Some(&sidebar_widget),
+                Some(&split),
+                &persist,
+            );
+        })
     };
-    window.add_action(&zoom_in);
-    window.add_action(&zoom_out);
-    app.set_accels_for_action(
-        "win.gui-scale-in",
-        &[
-            "<Meta>plus",
-            "<Meta>equal",
-            "<Meta><Shift>equal",
-            "<Meta>KP_Add",
-        ],
-    );
-    app.set_accels_for_action(
-        "win.gui-scale-out",
-        &["<Meta>minus", "<Meta>KP_Subtract"],
-    );
+
+    wire_pointer_scroll(window, gallery, grid, bump.clone());
+    wire_ctrl_scale_keys(window, gallery, grid, bump, reset_gui);
 }
 
 #[cfg(test)]
@@ -363,6 +555,7 @@ mod tests {
     fn chrome_css_uses_scale_factor() {
         let css = chrome_scale_css(1.2);
         assert!(css.contains("--wt-s: 1.2"));
-        assert!(css.contains("16.80px")); // 14 * 1.2
+        assert!(css.contains("16.80px")); // 14 * 1.2 body font
+        assert!(css.contains("38.40px")); // 32 * 1.2 row height
     }
 }

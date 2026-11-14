@@ -2,16 +2,25 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use gtk4::gdk::Display;
+use gtk4::glib;
+use gtk4::glib::object::IsA;
 use gtk4::prelude::*;
 use gtk4::{
-    gio, Box, Button, CheckButton, Orientation, PolicyType, ScrolledWindow, SearchEntry, StringList, Widget,
+    gio, Align, Box, Button, CheckButton, Orientation, PolicyType, Revealer,
+    RevealerTransitionType, ScrolledWindow, SearchEntry, StringList, Widget,
 };
 use libadwaita::prelude::*;
-use libadwaita::{ActionRow, ComboRow, EntryRow, PreferencesGroup, SpinRow};
+use libadwaita::{
+    ActionRow, ComboRow, Dialog, DialogPresentationMode, EntryRow, ExpanderRow, PreferencesGroup,
+    SpinRow,
+};
 
 use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy, SortBy};
 use crate::metadata::parse_tag_input;
-use crate::ui::filter::{collect_folders, collect_tags, folder_label};
+use crate::ui::filter::{
+    collect_folders, collect_tags, folder_filter_summary, folder_label, group_by_summary,
+    ALL_FOLDERS_LABEL,
+};
 use crate::ui::gallery::{
     assign_tags, remove_tags, set_favorite, set_random_wallpaper, GalleryModel, GalleryView,
 };
@@ -19,15 +28,16 @@ use crate::ui::masonry::MasonryGrid;
 
 const ALL_MONITORS: &str = "All monitors";
 const ALL_TAGS: &str = "All tags";
-const ALL_FOLDERS: &str = "All folders";
 
 /// Sidebar with filename search, output, backend, and awww animation controls. Changes update the shared
-/// config immediately and persist to the XDG config file. An **Edit** section at the bottom
-/// assigns tags to the wallpapers selected in the gallery.
+/// config immediately and persist to the XDG config file. **Edit** and **Shared tags** sit in a
+/// bottom pane (at most half the sidebar height).
 pub struct Sidebar {
     pub widget: Widget,
-    /// Vertical stack inside the scrolled sidebar; section spacing follows GUI scale.
+    /// Browse / Output / Gallery stack; section spacing follows GUI scale.
     pub content: Box,
+    /// Edit / Shared tags stack; section spacing follows GUI scale.
+    pub edit_content: Box,
     /// Opens the wallpaper folder chooser; the app wires the action.
     pub pick_folder: Button,
 }
@@ -54,9 +64,7 @@ impl Sidebar {
         let backend_row = ComboRow::builder()
             .title("Backend")
             .tooltip_text("Wallpaper daemon to use")
-            .model(&StringList::new(
-                &BackendKind::ALL.map(BackendKind::as_str),
-            ))
+            .model(&StringList::new(&BackendKind::ALL.map(BackendKind::as_str)))
             .build();
         backend_row.set_selected(
             BackendKind::ALL
@@ -66,12 +74,11 @@ impl Sidebar {
         );
 
         let output_group = PreferencesGroup::builder().title("Output").build();
-        // The refresh button sits in the group header so it does not crush the monitor value.
-        output_group.set_header_suffix(Some(&refresh));
         output_group.add(&monitor_row);
         output_group.add(&backend_row);
 
-        let gallery_group = build_gallery_section(config.clone(), gallery.clone(), model.clone(), &grid);
+        let gallery_group =
+            build_gallery_section(config.clone(), gallery.clone(), model.clone(), &grid);
 
         let transition_row = ComboRow::builder()
             .title("Transition")
@@ -103,15 +110,47 @@ impl Sidebar {
             angle_row.set_visible(cfg.awww.transition.uses_angle());
         }
 
-        let awww_group = PreferencesGroup::builder()
-            .title("awww animation")
-            .description("Applies when the backend is awww")
+        let anim_group = PreferencesGroup::builder().build();
+        anim_group.add(&transition_row);
+        anim_group.add(&duration_row);
+        anim_group.add(&fps_row);
+        anim_group.add(&angle_row);
+
+        let anim_body = Box::new(Orientation::Vertical, 0);
+        anim_body.add_css_class("walltag-sidebar");
+        anim_body.add_css_class("walltag-awww-dialog-body");
+        anim_body.append(&anim_group);
+
+        let anim_dialog = Dialog::builder()
+            .title("Animation")
+            .content_width(300)
+            .follows_content_size(true)
+            .presentation_mode(DialogPresentationMode::Floating)
+            .child(&anim_body)
             .build();
-        awww_group.add(&transition_row);
-        awww_group.add(&duration_row);
-        awww_group.add(&fps_row);
-        awww_group.add(&angle_row);
-        awww_group.set_visible(config.borrow().backend == BackendKind::Awww);
+        anim_dialog.add_css_class("walltag-awww-dialog");
+
+        let anim_btn = Button::builder()
+            .icon_name("preferences-system-symbolic")
+            .tooltip_text("awww animation settings")
+            .valign(Align::Center)
+            .css_classes(["flat"])
+            .build();
+        {
+            let anim_dialog = anim_dialog.clone();
+            anim_btn.connect_clicked(move |btn| {
+                anim_dialog.present(Some(btn));
+            });
+        }
+        let awww_selected = config.borrow().backend == BackendKind::Awww;
+        anim_btn.set_visible(awww_selected);
+
+        // Refresh + animation share the Output header so controls stay in-section.
+        let output_header = Box::new(Orientation::Horizontal, 2);
+        output_header.set_valign(Align::Center);
+        output_header.append(&anim_btn);
+        output_header.append(&refresh);
+        output_group.set_header_suffix(Some(&output_header));
 
         // Monitor list. `monitors` maps combo index to output name (`None` = all).
         let monitors: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(Vec::new()));
@@ -130,9 +169,8 @@ impl Sidebar {
                     .map(|e| e.as_deref().unwrap_or(ALL_MONITORS))
                     .collect();
                 monitor_row.set_model(Some(&StringList::new(&labels)));
-                monitor_row.set_selected(
-                    entries.iter().position(|e| *e == selected).unwrap_or(0) as u32,
-                );
+                monitor_row
+                    .set_selected(entries.iter().position(|e| *e == selected).unwrap_or(0) as u32);
                 *monitors.borrow_mut() = entries;
                 rebuilding.set(false);
             })
@@ -168,12 +206,16 @@ impl Sidebar {
         }
         {
             let config = config.clone();
-            let awww_group = awww_group.clone();
+            let anim_btn = anim_btn.clone();
+            let anim_dialog = anim_dialog.clone();
             backend_row.connect_selected_notify(move |row| {
                 let Some(kind) = BackendKind::ALL.get(row.selected() as usize).copied() else {
                     return;
                 };
-                awww_group.set_visible(kind == BackendKind::Awww);
+                if kind != BackendKind::Awww {
+                    anim_dialog.force_close();
+                }
+                reveal_widget(&anim_btn, kind == BackendKind::Awww);
                 update(&config, |cfg| cfg.backend = kind);
             });
         }
@@ -187,7 +229,7 @@ impl Sidebar {
                 else {
                     return;
                 };
-                angle_row.set_visible(kind.uses_angle());
+                reveal_widget(&angle_row, kind.uses_angle());
                 update(&config, |cfg| cfg.awww.transition = kind);
             });
         }
@@ -227,27 +269,134 @@ impl Sidebar {
             pick_folder.clone(),
         );
 
-        let content = Box::new(Orientation::Vertical, 16);
+        let content = Box::new(Orientation::Vertical, 10);
         content.add_css_class("walltag-sidebar");
         content.append(&search_group);
         content.append(&output_group);
         content.append(&gallery_group);
-        content.append(&awww_group);
-        content.append(&build_edit_section(gallery.clone(), grid, model));
 
-        let scroll = ScrolledWindow::builder()
+        let top_scroll = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
+            .vscrollbar_policy(PolicyType::Automatic)
             .vexpand(true)
+            .hexpand(true)
             .child(&content)
             .build();
-        scroll.add_css_class("walltag-sidebar-shell");
+
+        let edit_content = build_edit_section(gallery.clone(), grid, model);
+        edit_content.add_css_class("walltag-sidebar");
+
+        let edit_scroll = ScrolledWindow::builder()
+            .hscrollbar_policy(PolicyType::Never)
+            .vscrollbar_policy(PolicyType::Automatic)
+            .vexpand(false)
+            .hexpand(true)
+            .propagate_natural_height(true)
+            .child(&edit_content)
+            .build();
+        edit_scroll.add_css_class("walltag-sidebar-edit");
+
+        let shell = Box::new(Orientation::Vertical, 0);
+        shell.add_css_class("walltag-sidebar-shell");
+        shell.append(&top_scroll);
+        shell.append(&edit_scroll);
+        wire_edit_pane_max_height(&shell, &edit_scroll);
 
         Self {
-            widget: scroll.upcast(),
+            widget: shell.upcast(),
             content,
+            edit_content,
             pick_folder,
         }
     }
+}
+
+const SIDEBAR_REVEAL_MS: f64 = 200.0;
+
+/// Fades a header control in or out, then toggles visibility so layout can settle.
+fn reveal_widget(widget: &impl IsA<Widget>, show: bool) {
+    let widget = widget.as_ref().clone();
+    if show == widget.is_visible() && (show || widget.opacity() >= 0.99) {
+        if show {
+            widget.set_opacity(1.0);
+        }
+        return;
+    }
+    if show {
+        widget.set_visible(true);
+        widget.set_opacity(0.0);
+        let t0 = std::time::Instant::now();
+        widget.add_tick_callback(move |w, _| {
+            let t = (t0.elapsed().as_secs_f64() * 1000.0 / SIDEBAR_REVEAL_MS).min(1.0);
+            let eased = 1.0 - (1.0 - t).powi(3);
+            w.set_opacity(eased);
+            if t >= 1.0 {
+                w.set_opacity(1.0);
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    } else {
+        let start = widget.opacity();
+        let t0 = std::time::Instant::now();
+        widget.add_tick_callback(move |w, _| {
+            let t = (t0.elapsed().as_secs_f64() * 1000.0 / SIDEBAR_REVEAL_MS).min(1.0);
+            let eased = 1.0 - (1.0 - t).powi(3);
+            w.set_opacity(start * (1.0 - eased));
+            if t >= 1.0 {
+                w.set_opacity(1.0);
+                w.set_visible(false);
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+    }
+}
+
+/// Keeps the edit pane at most half the sidebar height while letting short content shrink.
+fn wire_edit_pane_max_height(shell: &Box, edit_scroll: &ScrolledWindow) {
+    let sync = {
+        let shell = shell.clone();
+        let edit_scroll = edit_scroll.clone();
+        Rc::new(move || {
+            let h = shell.height();
+            if h <= 1 {
+                return;
+            }
+            let max = h / 2;
+            if edit_scroll.max_content_height() != max {
+                edit_scroll.set_max_content_height(max);
+            }
+        })
+    };
+    {
+        let sync = sync.clone();
+        shell.connect_map(move |_| sync());
+    }
+    shell.connect_realize({
+        let sync = sync.clone();
+        let shell_weak = shell.downgrade();
+        move |shell| {
+            sync();
+            let Some(native) = shell.native() else {
+                return;
+            };
+            let Some(surface) = native.surface() else {
+                return;
+            };
+            let sync = sync.clone();
+            let shell_weak = shell_weak.clone();
+            surface.connect_layout(move |_, _, _| {
+                if shell_weak.upgrade().is_none() {
+                    return;
+                }
+                let sync = sync.clone();
+                glib::idle_add_local_once(move || sync());
+            });
+        }
+    });
 }
 
 const EMPTY_SELECTION_HINT: &str =
@@ -261,9 +410,7 @@ fn build_search_section(
     search: SearchEntry,
     pick_folder: Button,
 ) -> PreferencesGroup {
-    let group = PreferencesGroup::builder()
-        .title("Browse")
-        .build();
+    let group = PreferencesGroup::builder().title("Browse").build();
 
     let folder_pick_row = ActionRow::builder()
         .title("Wallpaper folder")
@@ -281,10 +428,12 @@ fn build_search_section(
     search_row.add_suffix(&search);
     group.add(&search_row);
 
-    let folder_row = ComboRow::builder()
-        .title("Folder")
-        .tooltip_text("Show only wallpapers in this workspace folder")
-        .build();
+    let folder_row = ExpanderRow::new();
+    folder_row.set_title("Folder");
+    folder_row.set_expanded(true);
+    folder_row.set_tooltip_text(Some(
+        "Show wallpapers in the checked folders. All folders shows every folder.",
+    ));
     group.add(&folder_row);
 
     let random = Button::builder()
@@ -301,35 +450,66 @@ fn build_search_section(
     random_row.add_suffix(&random);
     group.add(&random_row);
 
-    let folder_options: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    let folder_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
     let rebuilding = Rc::new(Cell::new(false));
 
     let rebuild_filters: Rc<dyn Fn()> = {
         let folder_row = folder_row.clone();
-        let folder_options = folder_options.clone();
+        let folder_rows = folder_rows.clone();
         let model = model.clone();
+        let gallery = gallery.clone();
+        let config = config.clone();
         let rebuilding = rebuilding.clone();
         Rc::new(move || {
-            rebuilding.set(true);
             let entries = model.entries().borrow().clone();
-            let filter = model.filter().borrow().clone();
-
+            let current = model.filter().borrow().folders.clone();
             let folders = collect_folders(&entries);
-            let mut folder_labels = vec![ALL_FOLDERS.to_owned()];
-            folder_labels.extend(folders.iter().map(|f| folder_label(f)));
-            let mut folder_opts = vec![None];
-            folder_opts.extend(folders.into_iter().map(Some));
-            let folder_sel = filter
-                .folder
-                .as_ref()
-                .and_then(|f| folder_opts.iter().position(|o| o.as_ref() == Some(f)))
-                .unwrap_or(0);
-            folder_row.set_model(Some(&StringList::new(
-                &folder_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            )));
-            folder_row.set_selected(folder_sel as u32);
-            *folder_options.borrow_mut() = folder_opts;
-            rebuilding.set(false);
+            // Drop folders that the latest scan no longer contains. An empty scan keeps
+            // the saved filter so a failed scan does not wipe it.
+            let pruned = if folders.is_empty() {
+                current.clone()
+            } else {
+                current
+                    .iter()
+                    .filter(|folder| folders.iter().any(|known| known == *folder))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            if pruned != current {
+                model.filter().borrow_mut().folders = pruned.clone();
+                update(&config, |cfg| cfg.filter_folders = pruned.clone());
+                refresh_soon(&gallery);
+            }
+            let selected = if pruned != current { pruned } else { current };
+            folder_row.set_subtitle(&folder_filter_summary(&selected));
+            let items: Vec<(String, String)> = folders
+                .iter()
+                .map(|folder| (folder.clone(), folder_label(folder)))
+                .collect();
+            let on_change: Rc<dyn Fn(Vec<String>)> = Rc::new({
+                let gallery = gallery.clone();
+                let model = model.clone();
+                let config = config.clone();
+                let folder_row = folder_row.clone();
+                move |selected| {
+                    folder_row.set_subtitle(&folder_filter_summary(&selected));
+                    if model.filter().borrow().folders == selected {
+                        return;
+                    }
+                    model.filter().borrow_mut().folders = selected.clone();
+                    update(&config, |cfg| cfg.filter_folders = selected);
+                    refresh_soon(&gallery);
+                }
+            });
+            install_exclusive_checks(
+                &folder_row,
+                &folder_rows,
+                ALL_FOLDERS_LABEL,
+                &items,
+                &selected,
+                &rebuilding,
+                on_change,
+            );
         })
     };
     rebuild_filters();
@@ -337,27 +517,6 @@ fn build_search_section(
         let rebuild_filters = rebuild_filters.clone();
         move || rebuild_filters()
     });
-
-    {
-        let gallery = gallery.clone();
-        let model = model.clone();
-        let folder_options = folder_options.clone();
-        let rebuilding = rebuilding.clone();
-        let config = config.clone();
-        folder_row.connect_selected_notify(move |row| {
-            if rebuilding.get() {
-                return;
-            }
-            let choice = folder_options
-                .borrow()
-                .get(row.selected() as usize)
-                .cloned()
-                .flatten();
-            model.filter().borrow_mut().folder = choice.clone();
-            update(&config, |cfg| cfg.filter_folder = choice);
-            gallery.refresh(true);
-        });
-    }
     {
         let model = model.clone();
         random.connect_clicked(move |_| match set_random_wallpaper(&model) {
@@ -379,18 +538,59 @@ fn build_gallery_section(
 ) -> PreferencesGroup {
     let group = PreferencesGroup::builder().title("Gallery").build();
 
-    let group_row = ComboRow::builder()
-        .title("Group by")
-        .tooltip_text("Section headers in the gallery")
-        .model(&StringList::new(&GroupBy::ALL.map(GroupBy::label)))
-        .build();
-    group_row.set_selected(
-        GroupBy::ALL
-            .iter()
-            .position(|g| *g == config.borrow().group_by)
-            .unwrap_or(0) as u32,
-    );
+    let group_row = ExpanderRow::new();
+    group_row.set_title("Group by");
+    group_row.set_expanded(true);
+    group_row.set_tooltip_text(Some(
+        "Section headers. Check folder, tag, or both. None leaves the gallery flat.",
+    ));
     group.add(&group_row);
+    let selected_kinds = GroupBy::normalize(&config.borrow().group_by);
+    group_row.set_subtitle(&group_by_summary(&selected_kinds));
+    let group_items = [
+        (
+            GroupBy::Folder.as_str().to_owned(),
+            GroupBy::Folder.label().to_owned(),
+        ),
+        (
+            GroupBy::Tag.as_str().to_owned(),
+            GroupBy::Tag.label().to_owned(),
+        ),
+    ];
+    let selected_ids: Vec<String> = selected_kinds
+        .iter()
+        .map(|kind| kind.as_str().to_owned())
+        .collect();
+    let group_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let group_rebuilding = Rc::new(Cell::new(false));
+    install_exclusive_checks(
+        &group_row,
+        &group_rows,
+        GroupBy::None.label(),
+        &group_items,
+        &selected_ids,
+        &group_rebuilding,
+        Rc::new({
+            let config = config.clone();
+            let gallery = gallery.clone();
+            let model = model.clone();
+            let group_row = group_row.clone();
+            move |ids| {
+                let kinds = GroupBy::normalize(
+                    &ids.iter()
+                        .filter_map(|id| GroupBy::parse(id))
+                        .collect::<Vec<_>>(),
+                );
+                group_row.set_subtitle(&group_by_summary(&kinds));
+                if model.filter().borrow().group_by == kinds {
+                    return;
+                }
+                model.filter().borrow_mut().group_by = kinds.clone();
+                update(&config, |cfg| cfg.group_by = kinds);
+                refresh_soon(&gallery);
+            }
+        }),
+    );
 
     let sort_row = ComboRow::builder()
         .title("Sort by")
@@ -473,22 +673,6 @@ fn build_gallery_section(
         let config = config.clone();
         let gallery = gallery.clone();
         let model = model.clone();
-        group_row.connect_selected_notify(move |row| {
-            let Some(kind) = GroupBy::ALL.get(row.selected() as usize).copied() else {
-                return;
-            };
-            if model.filter().borrow().group_by == kind {
-                return;
-            }
-            model.filter().borrow_mut().group_by = kind;
-            update(&config, |cfg| cfg.group_by = kind);
-            gallery.refresh(true);
-        });
-    }
-    {
-        let config = config.clone();
-        let gallery = gallery.clone();
-        let model = model.clone();
         sort_row.connect_selected_notify(move |row| {
             let Some(kind) = SortBy::ALL.get(row.selected() as usize).copied() else {
                 return;
@@ -528,12 +712,12 @@ fn build_gallery_section(
     group
 }
 
-/// Edit section in the sidebar scroll content (same chrome as Browse / Gallery).
+/// Edit + shared tags for the bottom-anchored sidebar pane.
 fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: GalleryModel) -> Box {
     let clear = Button::builder()
         .label("Clear")
         .tooltip_text("Clear selection (Esc)")
-        .valign(gtk4::Align::Center)
+        .valign(Align::Center)
         .css_classes(["flat"])
         .build();
     let tags_row = EntryRow::builder()
@@ -541,7 +725,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         .show_apply_button(true)
         .build();
     let favorite_check = CheckButton::new();
-    favorite_check.set_valign(gtk4::Align::Center);
+    favorite_check.set_valign(Align::Center);
     let favorite_row = ActionRow::builder()
         .title("Favorite")
         .subtitle("Appears in the Favorites group")
@@ -558,6 +742,12 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         .title("Shared tags")
         .description("Tags on every selected wallpaper. Remove deletes them from the selection.")
         .build();
+    let shared_revealer = Revealer::builder()
+        .transition_type(RevealerTransitionType::SlideDown)
+        .transition_duration(SIDEBAR_REVEAL_MS as u32)
+        .reveal_child(false)
+        .child(&shared_group)
+        .build();
     let shared_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
     let syncing = Rc::new(Cell::new(false));
     // Filled after `refresh` is built so remove / favorite handlers can call it.
@@ -567,6 +757,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         let grid = grid.clone();
         let group = group.clone();
         let shared_group = shared_group.clone();
+        let shared_revealer = shared_revealer.clone();
         let tags_row = tags_row.clone();
         let clear = clear.clone();
         let favorite_check = favorite_check.clone();
@@ -614,7 +805,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
             } else {
                 Vec::new()
             };
-            shared_group.set_visible(count > 0);
+            shared_revealer.set_reveal_child(count > 0);
             if shared.is_empty() {
                 shared_group.set_description(Some(if count == 0 {
                     "Select wallpapers to manage shared tags."
@@ -633,7 +824,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
                     let remove = Button::builder()
                         .icon_name("list-remove-symbolic")
                         .tooltip_text(format!("Remove “{tag}” from selection"))
-                        .valign(gtk4::Align::Center)
+                        .valign(Align::Center)
                         .css_classes(["flat"])
                         .build();
                     {
@@ -706,11 +897,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
                 Ok(()) => {
                     group.set_description(Some(&format!(
                         "{} {} selected",
-                        if favorite {
-                            "Favorited"
-                        } else {
-                            "Unfavorited"
-                        },
+                        if favorite { "Favorited" } else { "Unfavorited" },
                         keys.len()
                     )));
                     gallery.refresh(false);
@@ -718,9 +905,8 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
                 }
                 Err(err) => {
                     tracing::error!("Failed to save favorite: {err:#}");
-                    group.set_description(Some(
-                        "Could not save favorite. See the log for details.",
-                    ));
+                    group
+                        .set_description(Some("Could not save favorite. See the log for details."));
                 }
             }
         });
@@ -757,10 +943,16 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         });
     }
 
-    let section = Box::new(Orientation::Vertical, 12);
+    let section = Box::new(Orientation::Vertical, 10);
     section.append(&group);
-    section.append(&shared_group);
+    section.append(&shared_revealer);
     section
+}
+
+/// Rebuilds the gallery on the next idle turn so a check handler can finish first.
+fn refresh_soon(gallery: &Rc<GalleryView>) {
+    let gallery = Rc::clone(gallery);
+    glib::idle_add_local_once(move || gallery.refresh(true));
 }
 
 /// Applies `change` to the shared config and writes it to disk.
@@ -784,6 +976,126 @@ fn monitor_entries(mut connected: Vec<String>, saved: Option<&str>) -> Vec<Optio
     let mut entries = vec![None];
     entries.extend(connected.into_iter().map(Some));
     entries
+}
+
+/// Result of toggling one row in an exclusive checklist.
+///
+/// Index 0 is the "all / none" row. It is on exactly when the returned indexes are
+/// empty. Every other row can be on at the same time. `active` is the state after the
+/// click, and `toggled` is the row that changed.
+fn exclusive_after_toggle(active: &[bool], toggled: usize) -> Vec<usize> {
+    if active.is_empty() || toggled >= active.len() {
+        return Vec::new();
+    }
+    let mut on = active.to_vec();
+    if toggled == 0 {
+        if on[0] {
+            for flag in &mut on[1..] {
+                *flag = false;
+            }
+        } else {
+            on[0] = true;
+        }
+    } else if on[toggled] {
+        on[0] = false;
+    } else if !on[1..].iter().any(|flag| *flag) {
+        on[0] = true;
+    }
+    on.iter()
+        .enumerate()
+        .skip(1)
+        .filter_map(|(index, flag)| flag.then_some(index))
+        .collect()
+}
+
+/// Writes `keep` back onto the checks. Index 0 is the exclusive row.
+fn apply_exclusive_toggle(checks: &[(Option<String>, CheckButton)], toggled: usize) -> Vec<String> {
+    let active: Vec<bool> = checks.iter().map(|(_, check)| check.is_active()).collect();
+    let keep = exclusive_after_toggle(&active, toggled);
+    let all_on = keep.is_empty();
+    if checks[0].1.is_active() != all_on {
+        checks[0].1.set_active(all_on);
+    }
+    for index in 1..checks.len() {
+        let on = keep.contains(&index);
+        if checks[index].1.is_active() != on {
+            checks[index].1.set_active(on);
+        }
+    }
+    keep.into_iter()
+        .filter_map(|index| checks[index].0.clone())
+        .collect()
+}
+
+fn check_row(title: &str, check: &CheckButton) -> ActionRow {
+    check.set_valign(gtk4::Align::Center);
+    let row = ActionRow::builder()
+        .title(title)
+        .activatable_widget(check)
+        .build();
+    row.add_suffix(check);
+    row
+}
+
+/// Replaces the expander's rows with an exclusive "all" row plus one check per item.
+///
+/// `selected` lists item ids. An empty `selected` checks the all-row. Checking an item
+/// clears the all-row. Checking the all-row clears the items. Unchecking the last item
+/// checks the all-row again.
+fn install_exclusive_checks(
+    expander: &ExpanderRow,
+    stored_rows: &Rc<RefCell<Vec<ActionRow>>>,
+    all_label: &str,
+    items: &[(String, String)],
+    selected: &[String],
+    rebuilding: &Rc<Cell<bool>>,
+    on_change: Rc<dyn Fn(Vec<String>)>,
+) {
+    rebuilding.set(true);
+    for row in stored_rows.borrow_mut().drain(..) {
+        expander.remove(&row);
+    }
+
+    let any = items
+        .iter()
+        .any(|(id, _)| selected.iter().any(|picked| picked == id));
+    let mut checks: Vec<(Option<String>, CheckButton)> = Vec::new();
+    let mut ui_rows = Vec::new();
+
+    let all_check = CheckButton::new();
+    all_check.set_active(!any);
+    checks.push((None, all_check.clone()));
+    let all_row = check_row(all_label, &all_check);
+    expander.add_row(&all_row);
+    ui_rows.push(all_row);
+
+    for (id, label) in items {
+        let check = CheckButton::new();
+        check.set_active(any && selected.iter().any(|picked| picked == id));
+        checks.push((Some(id.clone()), check.clone()));
+        let row = check_row(label, &check);
+        expander.add_row(&row);
+        ui_rows.push(row);
+    }
+    *stored_rows.borrow_mut() = ui_rows;
+
+    let checks = Rc::new(checks);
+    for idx in 0..checks.len() {
+        let check = checks[idx].1.clone();
+        let checks = Rc::clone(&checks);
+        let rebuilding = rebuilding.clone();
+        let on_change = Rc::clone(&on_change);
+        check.connect_toggled(move |_| {
+            if rebuilding.get() {
+                return;
+            }
+            rebuilding.set(true);
+            let selected = apply_exclusive_toggle(&checks, idx);
+            rebuilding.set(false);
+            on_change(selected);
+        });
+    }
+    rebuilding.set(false);
 }
 
 /// Output names (for example `DP-1`) reported by GDK. On Wayland these match the names
@@ -818,5 +1130,44 @@ mod tests {
     fn saved_monitor_is_not_duplicated() {
         let entries = monitor_entries(vec!["DP-1".into()], Some("DP-1"));
         assert_eq!(entries, vec![None, Some("DP-1".into())]);
+    }
+
+    #[test]
+    fn all_row_clears_items() {
+        assert_eq!(
+            exclusive_after_toggle(&[true, true, true], 0),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn checking_an_item_clears_the_all_row() {
+        assert_eq!(exclusive_after_toggle(&[true, true, false], 1), vec![1]);
+    }
+
+    #[test]
+    fn checking_another_item_keeps_the_first() {
+        assert_eq!(exclusive_after_toggle(&[false, true, true], 2), vec![1, 2]);
+    }
+
+    #[test]
+    fn unchecking_one_item_keeps_the_rest() {
+        assert_eq!(exclusive_after_toggle(&[false, false, true], 1), vec![2]);
+    }
+
+    #[test]
+    fn unchecking_the_last_item_restores_all() {
+        assert_eq!(
+            exclusive_after_toggle(&[false, false], 1),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn unchecking_all_does_not_stick() {
+        assert_eq!(
+            exclusive_after_toggle(&[false, false], 0),
+            Vec::<usize>::new()
+        );
     }
 }

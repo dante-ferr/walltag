@@ -1,8 +1,10 @@
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -137,9 +139,12 @@ pub struct AppConfig {
     /// Show each wallpaper's file name under its tile.
     #[serde(default)]
     pub show_filenames: bool,
-    /// How the gallery groups wallpapers (none, folder, or tag).
-    #[serde(default)]
-    pub group_by: GroupBy,
+    /// Grouping dimensions. Empty leaves the gallery flat.
+    ///
+    /// Folder is the outer group when both are set. A legacy config may store one
+    /// string: `"none"`, `"folder"`, or `"tag"`.
+    #[serde(default, deserialize_with = "deserialize_group_by")]
+    pub group_by: Vec<GroupBy>,
     /// How the gallery orders groups and the wallpapers inside them.
     #[serde(default)]
     pub sort_by: SortBy,
@@ -149,9 +154,14 @@ pub struct AppConfig {
     /// Tag filter (`None` = all tags).
     #[serde(default)]
     pub filter_tag: Option<String>,
-    /// Folder filter as `parent_relative` (`None` = all folders, `Some("")` = root).
-    #[serde(default)]
-    pub filter_folder: Option<String>,
+    /// Folders to show, as `parent_relative` (`""` is the wallpaper root).
+    /// Empty shows every folder. A legacy config may store one string or `null`.
+    #[serde(
+        default,
+        rename = "filter_folder",
+        deserialize_with = "deserialize_filter_folders"
+    )]
+    pub filter_folders: Vec<String>,
     /// Gallery zoom factor (1.0 = 100%).
     #[serde(default = "default_zoom")]
     pub zoom: f32,
@@ -212,7 +222,10 @@ impl SortBy {
     }
 }
 
-/// How the gallery groups wallpapers under section headers.
+/// One way to group wallpapers under section headers.
+///
+/// The gallery stores a list of these. `None` means the list is empty. Folder and Tag
+/// can both be active; Folder is the outer group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum GroupBy {
@@ -241,6 +254,22 @@ impl GroupBy {
             Self::Folder => "Folder",
             Self::Tag => "Tag",
         }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|kind| kind.as_str() == name)
+    }
+
+    /// Keeps Folder and Tag, in that order. `None` and duplicates are dropped.
+    pub fn normalize(kinds: &[Self]) -> Vec<Self> {
+        let mut out = Vec::new();
+        if kinds.contains(&Self::Folder) {
+            out.push(Self::Folder);
+        }
+        if kinds.contains(&Self::Tag) {
+            out.push(Self::Tag);
+        }
+        out
     }
 }
 
@@ -293,11 +322,11 @@ impl Default for AppConfig {
             custom_css: None,
             sidebar_width: default_sidebar_width(),
             show_filenames: false,
-            group_by: GroupBy::default(),
+            group_by: Vec::new(),
             sort_by: SortBy::default(),
             search_query: String::new(),
             filter_tag: None,
-            filter_folder: None,
+            filter_folders: Vec::new(),
             zoom: default_zoom(),
             gui_scale: default_gui_scale(),
             sidebar_visible: true,
@@ -315,6 +344,8 @@ impl AppConfig {
         self.sidebar_width = self.sidebar_width.clamp(min, max);
         self.zoom = self.zoom.clamp(0.4, 3.0);
         self.gui_scale = self.gui_scale.clamp(0.75, 1.75);
+        self.group_by = GroupBy::normalize(&self.group_by);
+        self.filter_folders = dedupe_strings(&self.filter_folders);
         Ok(())
     }
 
@@ -354,13 +385,11 @@ impl ConfigPaths {
             fs::create_dir_all(&paths.config_dir).context("create walltag config directory")?;
             let mut default = AppConfig::default();
             default.expand_paths()?;
-            let pretty = serde_json::to_string_pretty(&default).context("serialize default config")?;
+            let pretty =
+                serde_json::to_string_pretty(&default).context("serialize default config")?;
             fs::write(&paths.config_file, format!("{pretty}\n"))
                 .with_context(|| format!("write {}", paths.config_file.display()))?;
-            tracing::info!(
-                "Wrote default config to {}",
-                paths.config_file.display()
-            );
+            tracing::info!("Wrote default config to {}", paths.config_file.display());
             default
         };
         config.expand_paths()?;
@@ -375,6 +404,106 @@ impl ConfigPaths {
             .with_context(|| format!("write {}", paths.config_file.display()))?;
         Ok(())
     }
+}
+
+fn dedupe_strings(items: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for item in items {
+        if !out.contains(item) {
+            out.push(item.clone());
+        }
+    }
+    out
+}
+
+fn group_by_from_str<E: de::Error>(text: &str) -> Result<Vec<GroupBy>, E> {
+    let kind =
+        GroupBy::parse(text).ok_or_else(|| E::unknown_variant(text, &["none", "folder", "tag"]))?;
+    Ok(GroupBy::normalize(&[kind]))
+}
+
+fn deserialize_group_by<'de, D>(deserializer: D) -> Result<Vec<GroupBy>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct GroupByVisitor;
+
+    impl<'de> Visitor<'de> for GroupByVisitor {
+        type Value = Vec<GroupBy>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a group-by name or a list of them")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            group_by_from_str(value)
+        }
+
+        fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+            group_by_from_str(&value)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::new();
+            while let Some(kind) = seq.next_element::<GroupBy>()? {
+                items.push(kind);
+            }
+            Ok(GroupBy::normalize(&items))
+        }
+    }
+
+    deserializer.deserialize_any(GroupByVisitor)
+}
+
+fn deserialize_filter_folders<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct FolderVisitor;
+
+    impl<'de> Visitor<'de> for FolderVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a folder, null, or a list of folders")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok(vec![value.to_owned()])
+        }
+
+        fn visit_string<E: de::Error>(self, value: String) -> Result<Self::Value, E> {
+            Ok(vec![value])
+        }
+
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(Vec::new())
+        }
+
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let mut items = Vec::new();
+            while let Some(folder) = seq.next_element::<String>()? {
+                if !items.contains(&folder) {
+                    items.push(folder);
+                }
+            }
+            Ok(items)
+        }
+    }
+
+    deserializer.deserialize_any(FolderVisitor)
 }
 
 fn expand_home(path: &Path) -> Result<PathBuf> {
@@ -405,7 +534,8 @@ mod tests {
         assert_eq!(cfg.sort_by, SortBy::NameAsc);
         assert!(cfg.search_query.is_empty());
         assert_eq!(cfg.filter_tag, None);
-        assert_eq!(cfg.filter_folder, None);
+        assert!(cfg.group_by.is_empty());
+        assert!(cfg.filter_folders.is_empty());
         assert_eq!(cfg.zoom, 1.0);
         assert_eq!(cfg.gui_scale, 1.0);
         assert!(cfg.sidebar_visible);
@@ -445,6 +575,58 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn legacy_group_by_and_folder_load_as_lists() {
+        let folder: AppConfig = serde_json::from_str(
+            r#"{"wallpaper_root":"/x","group_by":"folder","filter_folder":"cats"}"#,
+        )
+        .unwrap();
+        assert_eq!(folder.group_by, vec![GroupBy::Folder]);
+        assert_eq!(folder.filter_folders, vec!["cats".to_owned()]);
+
+        let none: AppConfig = serde_json::from_str(
+            r#"{"wallpaper_root":"/x","group_by":"none","filter_folder":null}"#,
+        )
+        .unwrap();
+        assert!(none.group_by.is_empty());
+        assert!(none.filter_folders.is_empty());
+
+        let root: AppConfig =
+            serde_json::from_str(r#"{"wallpaper_root":"/x","filter_folder":""}"#).unwrap();
+        assert_eq!(root.filter_folders, vec!["".to_owned()]);
+
+        let both: AppConfig = serde_json::from_str(
+            r#"{"wallpaper_root":"/x","group_by":["tag","none","folder"],"filter_folder":["cats","","cats"]}"#,
+        )
+        .unwrap();
+        assert_eq!(both.group_by, vec![GroupBy::Folder, GroupBy::Tag]);
+        assert_eq!(both.filter_folders, vec!["cats".to_owned(), "".to_owned()]);
+    }
+
+    #[test]
+    fn group_by_and_folders_round_trip_as_lists() {
+        let mut cfg = AppConfig::default();
+        cfg.group_by = vec![GroupBy::Tag, GroupBy::Folder, GroupBy::None];
+        cfg.filter_folders = vec!["cats".into(), "".into(), "cats".into()];
+        cfg.expand_paths().unwrap();
+        assert_eq!(cfg.group_by, vec![GroupBy::Folder, GroupBy::Tag]);
+        assert_eq!(cfg.filter_folders, vec!["cats".to_owned(), "".to_owned()]);
+
+        let raw = serde_json::to_string(&cfg).unwrap();
+        assert!(raw.contains(r#""group_by":["folder","tag"]"#));
+        assert!(raw.contains(r#""filter_folder":["cats",""]"#));
+        let back: AppConfig = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.group_by, cfg.group_by);
+        assert_eq!(back.filter_folders, cfg.filter_folders);
+    }
+
+    #[test]
+    fn unknown_group_by_is_rejected() {
+        let err =
+            serde_json::from_str::<AppConfig>(r#"{"wallpaper_root":"/x","group_by":"color"}"#);
+        assert!(err.is_err());
+    }
+
     fn awww_options_round_trip() {
         let mut cfg = AppConfig::default();
         cfg.monitor = Some("DP-1".into());

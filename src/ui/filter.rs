@@ -17,17 +17,48 @@ pub const ROOT_FOLDER_LABEL: &str = "Root";
 pub const UNTAGGED_LABEL: &str = "Untagged";
 /// Label for the favorites section when grouping.
 pub const FAVORITES_LABEL: &str = "Favorites";
+/// Folder checklist row that shows every folder.
+pub const ALL_FOLDERS_LABEL: &str = "All folders";
 
 /// Active search / filter / group / sort state (persisted via `AppConfig`).
 #[derive(Debug, Clone, Default)]
 pub struct GalleryFilter {
     pub query: String,
-    pub group_by: GroupBy,
+    /// Empty leaves the gallery flat. Folder and Tag can both be set; Folder is outer.
+    pub group_by: Vec<GroupBy>,
     pub sort_by: SortBy,
     /// When set, only wallpapers that have this tag.
     pub tag: Option<String>,
-    /// When set, only wallpapers in this folder (`parent_relative`, empty = root).
-    pub folder: Option<String>,
+    /// Folders to show (`parent_relative`, empty string = root). Empty shows every folder.
+    pub folders: Vec<String>,
+}
+
+/// Subtitle for the group-by checklist. Empty selection reads as None.
+pub fn group_by_summary(kinds: &[GroupBy]) -> String {
+    let kinds = GroupBy::normalize(kinds);
+    if kinds.is_empty() {
+        GroupBy::None.label().to_owned()
+    } else {
+        kinds
+            .into_iter()
+            .map(GroupBy::label)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Subtitle for the folder checklist. Empty selection shows every folder.
+pub fn folder_filter_summary(selected: &[String]) -> String {
+    match selected.len() {
+        0 => ALL_FOLDERS_LABEL.to_owned(),
+        1 => folder_label(&selected[0]),
+        n if n <= 3 => selected
+            .iter()
+            .map(|folder| folder_label(folder))
+            .collect::<Vec<_>>()
+            .join(", "),
+        n => format!("{n} folders"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,8 +145,9 @@ impl SortData {
     pub fn replace_stats(&mut self, stats: HashMap<String, FileStat>) {
         let old = std::mem::take(&mut self.stats);
         self.unreadable.clear();
-        self.colors
-            .retain(|key, _| matches!((old.get(key), stats.get(key)), (Some(a), Some(b)) if a == b));
+        self.colors.retain(
+            |key, _| matches!((old.get(key), stats.get(key)), (Some(a), Some(b)) if a == b),
+        );
         self.stats = stats;
     }
 
@@ -276,10 +308,13 @@ pub fn build_rows(
             if !query.is_empty() && !wp.file_name.to_lowercase().contains(&query) {
                 return false;
             }
-            if let Some(folder) = &filter.folder {
-                if &wp.parent_relative != folder {
-                    return false;
-                }
+            if !filter.folders.is_empty()
+                && !filter
+                    .folders
+                    .iter()
+                    .any(|folder| folder == &wp.parent_relative)
+            {
+                return false;
             }
             if let Some(tag) = &filter.tag {
                 let tags = metadata.record_for_key(&wp.relative_key).tags;
@@ -291,56 +326,142 @@ pub fn build_rows(
         })
         .collect();
     filtered.sort_by(|a, b| compare_entries(a, b, sort, sort_data));
+    group_rows(filtered, metadata, &filter.group_by, sort, sort_data)
+}
 
-    match filter.group_by {
-        GroupBy::None => filtered
+/// Tag labels a wallpaper belongs under. Untagged files use [`UNTAGGED_LABEL`].
+fn tag_bucket_labels(wp: &WallpaperEntry, metadata: &MetadataStore) -> Vec<String> {
+    let tags = metadata.record_for_key(&wp.relative_key).tags;
+    if tags.is_empty() {
+        vec![UNTAGGED_LABEL.to_owned()]
+    } else {
+        tags
+    }
+}
+
+fn collect_favorites<'a>(
+    filtered: &[&'a WallpaperEntry],
+    metadata: &MetadataStore,
+) -> Vec<&'a WallpaperEntry> {
+    filtered
+        .iter()
+        .copied()
+        .filter(|wp| metadata.record_for_key(&wp.relative_key).favorite)
+        .collect()
+}
+
+/// Groups `filtered` by the selected dimensions. Folder and Tag together nest as
+/// `folder / tag`. An empty selection is a flat list.
+fn group_rows(
+    filtered: Vec<&WallpaperEntry>,
+    metadata: &MetadataStore,
+    group_by: &[GroupBy],
+    sort: SortBy,
+    sort_data: &SortData,
+) -> Vec<GalleryRow> {
+    let group_by = GroupBy::normalize(group_by);
+    let by_folder = group_by.contains(&GroupBy::Folder);
+    let by_tag = group_by.contains(&GroupBy::Tag);
+    if !by_folder && !by_tag {
+        return filtered
             .into_iter()
             .cloned()
             .map(GalleryRow::Wallpaper)
-            .collect(),
-        GroupBy::Folder => {
-            let mut groups: BTreeMap<String, Vec<&WallpaperEntry>> = BTreeMap::new();
-            let mut favorites: Vec<&WallpaperEntry> = Vec::new();
-            for wp in &filtered {
-                if metadata.record_for_key(&wp.relative_key).favorite {
-                    favorites.push(*wp);
-                }
+            .collect();
+    }
+
+    let favorites = collect_favorites(&filtered, metadata);
+    if by_folder && by_tag {
+        let mut groups: BTreeMap<String, BTreeMap<String, Vec<&WallpaperEntry>>> = BTreeMap::new();
+        for wp in &filtered {
+            let outer = folder_label(&wp.parent_relative);
+            for tag in tag_bucket_labels(wp, metadata) {
                 groups
-                    .entry(folder_label(&wp.parent_relative))
+                    .entry(outer.clone())
+                    .or_default()
+                    .entry(tag)
                     .or_default()
                     .push(*wp);
             }
-            flatten_groups_with_favorites(groups, favorites, None, sort, sort_data)
         }
-        GroupBy::Tag => {
-            let mut groups: BTreeMap<String, Vec<&WallpaperEntry>> = BTreeMap::new();
-            let mut favorites: Vec<&WallpaperEntry> = Vec::new();
-            for wp in &filtered {
-                let record = metadata.record_for_key(&wp.relative_key);
-                if record.favorite {
-                    favorites.push(*wp);
-                }
-                if record.tags.is_empty() {
-                    groups
-                        .entry(UNTAGGED_LABEL.to_owned())
-                        .or_default()
-                        .push(*wp);
-                } else {
-                    // Appear under every tag the wallpaper carries.
-                    for tag in &record.tags {
-                        groups.entry(tag.clone()).or_default().push(*wp);
-                    }
-                }
-            }
-            flatten_groups_with_favorites(
-                groups,
-                favorites,
-                Some(UNTAGGED_LABEL),
-                sort,
-                sort_data,
-            )
+        return flatten_nested(groups, favorites, sort, sort_data);
+    }
+
+    if by_folder {
+        let mut groups: BTreeMap<String, Vec<&WallpaperEntry>> = BTreeMap::new();
+        for wp in &filtered {
+            groups
+                .entry(folder_label(&wp.parent_relative))
+                .or_default()
+                .push(*wp);
+        }
+        return flatten_groups_with_favorites(groups, favorites, None, sort, sort_data);
+    }
+
+    let mut groups: BTreeMap<String, Vec<&WallpaperEntry>> = BTreeMap::new();
+    for wp in &filtered {
+        for tag in tag_bucket_labels(wp, metadata) {
+            groups.entry(tag).or_default().push(*wp);
         }
     }
+    flatten_groups_with_favorites(groups, favorites, Some(UNTAGGED_LABEL), sort, sort_data)
+}
+
+/// Folder is the outer group and each tag inside it is `folder / tag`.
+fn flatten_nested(
+    groups: BTreeMap<String, BTreeMap<String, Vec<&WallpaperEntry>>>,
+    favorites: Vec<&WallpaperEntry>,
+    sort: SortBy,
+    data: &SortData,
+) -> Vec<GalleryRow> {
+    let mut rows = Vec::new();
+    if !favorites.is_empty() {
+        let mut favorites = favorites;
+        favorites.sort_by(|a, b| compare_entries(a, b, sort, data));
+        append_group(&mut rows, FAVORITES_LABEL.to_owned(), favorites);
+    }
+
+    let mut outers: Vec<(GroupKey, String, BTreeMap<String, Vec<&WallpaperEntry>>)> = groups
+        .into_iter()
+        .map(|(label, inners)| {
+            let items = unique_items(&inners);
+            let group = Group {
+                label: label.clone(),
+                items,
+            };
+            let key = group_key(&group, sort, data);
+            (key, label, inners)
+        })
+        .collect();
+    outers.sort_by(|a, b| {
+        cmp_group_keys(&a.0, &b.0, sort).then_with(|| label_key(&a.1).cmp(&label_key(&b.1)))
+    });
+
+    for (_, outer, inners) in outers {
+        for row in flatten_groups(inners, Some(UNTAGGED_LABEL), sort, data) {
+            match row {
+                GalleryRow::Header(inner) => {
+                    rows.push(GalleryRow::Header(format!("{outer} / {inner}")));
+                }
+                other => rows.push(other),
+            }
+        }
+    }
+    rows
+}
+
+/// One entry per wallpaper, for outer-group sort keys that should not count a file twice.
+fn unique_items<'a>(inners: &BTreeMap<String, Vec<&'a WallpaperEntry>>) -> Vec<&'a WallpaperEntry> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for group in inners.values() {
+        for wp in group {
+            if seen.insert(wp.relative_key.as_str()) {
+                items.push(*wp);
+            }
+        }
+    }
+    items
 }
 
 /// Like [`flatten_groups`], but puts a Favorites section first when it is non-empty.
@@ -415,11 +536,19 @@ mod tests {
     }
 
     fn gray(l: f32) -> AvgColor {
-        AvgColor { hue: 0.0, saturation: 0.0, lightness: l }
+        AvgColor {
+            hue: 0.0,
+            saturation: 0.0,
+            lightness: l,
+        }
     }
 
     fn hued(h: f32) -> AvgColor {
-        AvgColor { hue: h, saturation: 0.8, lightness: 0.5 }
+        AvgColor {
+            hue: h,
+            saturation: 0.8,
+            lightness: 0.5,
+        }
     }
 
     fn keys(rows: &[GalleryRow]) -> Vec<String> {
@@ -442,7 +571,11 @@ mod tests {
         keys(&build_rows(
             entries,
             &meta,
-            &GalleryFilter { group_by, sort_by, ..Default::default() },
+            &GalleryFilter {
+                group_by: GroupBy::normalize(&[group_by]),
+                sort_by,
+                ..Default::default()
+            },
             data,
         ))
     }
@@ -548,7 +681,14 @@ mod tests {
         d.colors.insert("green.png".into(), hued(120.0));
         assert_eq!(
             sorted(&entries, GroupBy::None, SortBy::Hue, &d),
-            ["red.png", "green.png", "blue.png", "black.png", "white.png", "unsampled.png"]
+            [
+                "red.png",
+                "green.png",
+                "blue.png",
+                "black.png",
+                "white.png",
+                "unsampled.png"
+            ]
         );
     }
 
@@ -565,16 +705,20 @@ mod tests {
         d.colors.insert("red/r.png".into(), hued(10.0));
         assert_eq!(
             sorted(&entries, GroupBy::Folder, SortBy::Hue, &d),
-            ["#red", "red/r.png", "#blue", "blue/b.png", "#gray", "gray/g.png"]
+            [
+                "#red",
+                "red/r.png",
+                "#blue",
+                "blue/b.png",
+                "#gray",
+                "gray/g.png"
+            ]
         );
     }
 
     #[test]
     fn untagged_group_stays_last_under_every_sort() {
-        let entries = vec![
-            entry("a.png", "", "a.png"),
-            entry("z.png", "", "z.png"),
-        ];
+        let entries = vec![entry("a.png", "", "a.png"), entry("z.png", "", "z.png")];
         let dir = TempDir::new().unwrap();
         let mut meta = MetadataStore::open(dir.path().join("m.json")).unwrap();
         meta.set_tags("z.png", vec!["alpha".into()]);
@@ -582,10 +726,18 @@ mod tests {
             let rows = build_rows(
                 &entries,
                 &meta,
-                &GalleryFilter { group_by: GroupBy::Tag, sort_by, ..Default::default() },
+                &GalleryFilter {
+                    group_by: vec![GroupBy::Tag],
+                    sort_by,
+                    ..Default::default()
+                },
                 &SortData::default(),
             );
-            assert_eq!(keys(&rows), ["#alpha", "z.png", "#Untagged", "a.png"], "{sort_by:?}");
+            assert_eq!(
+                keys(&rows),
+                ["#alpha", "z.png", "#Untagged", "a.png"],
+                "{sort_by:?}"
+            );
         }
     }
 
@@ -616,7 +768,7 @@ mod tests {
             &entries,
             &meta,
             &GalleryFilter {
-                group_by: GroupBy::Folder,
+                group_by: vec![GroupBy::Folder],
                 ..Default::default()
             },
             &SortData::default(),
@@ -629,10 +781,7 @@ mod tests {
 
     #[test]
     fn groups_by_every_tag_and_untagged() {
-        let entries = vec![
-            entry("a.png", "", "a.png"),
-            entry("b.png", "", "b.png"),
-        ];
+        let entries = vec![entry("a.png", "", "a.png"), entry("b.png", "", "b.png")];
         let dir = TempDir::new().unwrap();
         let mut meta = MetadataStore::open(dir.path().join("m.json")).unwrap();
         meta.set_tags("a.png", vec!["night".into(), "dark".into()]);
@@ -640,7 +789,7 @@ mod tests {
             &entries,
             &meta,
             &GalleryFilter {
-                group_by: GroupBy::Tag,
+                group_by: vec![GroupBy::Tag],
                 ..Default::default()
             },
             &SortData::default(),
@@ -668,7 +817,7 @@ mod tests {
             &entries,
             &meta,
             &GalleryFilter {
-                group_by: GroupBy::Tag,
+                group_by: vec![GroupBy::Tag],
                 ..Default::default()
             },
             &SortData::default(),
@@ -708,5 +857,91 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert!(matches!(&rows[0], GalleryRow::Wallpaper(w) if w.relative_key == "forest.png"));
+    }
+
+    #[test]
+    fn folder_filter_keeps_every_selected_folder() {
+        let entries = vec![
+            entry("a.png", "", "a.png"),
+            entry("cats/b.png", "cats", "b.png"),
+            entry("dogs/c.png", "dogs", "c.png"),
+        ];
+        let dir = TempDir::new().unwrap();
+        let meta = MetadataStore::open(dir.path().join("m.json")).unwrap();
+        let rows = build_rows(
+            &entries,
+            &meta,
+            &GalleryFilter {
+                folders: vec!["".into(), "dogs".into()],
+                ..Default::default()
+            },
+            &SortData::default(),
+        );
+        assert_eq!(keys(&rows), ["a.png", "dogs/c.png"]);
+
+        let all = build_rows(
+            &entries,
+            &meta,
+            &GalleryFilter::default(),
+            &SortData::default(),
+        );
+        assert_eq!(keys(&all), ["a.png", "cats/b.png", "dogs/c.png"]);
+    }
+
+    #[test]
+    fn folder_and_tag_nest_with_folder_outside() {
+        let entries = vec![
+            entry("cats/a.png", "cats", "a.png"),
+            entry("b.png", "", "b.png"),
+            entry("cats/c.png", "cats", "c.png"),
+        ];
+        let dir = TempDir::new().unwrap();
+        let mut meta = MetadataStore::open(dir.path().join("m.json")).unwrap();
+        meta.set_tags("cats/a.png", vec!["night".into(), "dark".into()]);
+        meta.set_tags("cats/c.png", vec!["night".into()]);
+        meta.set_favorite(&["cats/c.png".into()], true);
+        let rows = build_rows(
+            &entries,
+            &meta,
+            &GalleryFilter {
+                // Tag is listed first on purpose: Folder stays the outer group.
+                group_by: vec![GroupBy::Tag, GroupBy::Folder],
+                ..Default::default()
+            },
+            &SortData::default(),
+        );
+        assert_eq!(
+            keys(&rows),
+            [
+                "#Favorites",
+                "cats/c.png",
+                "#Root / Untagged",
+                "b.png",
+                "#cats / dark",
+                "cats/a.png",
+                "#cats / night",
+                "cats/a.png",
+                "cats/c.png",
+            ]
+        );
+    }
+
+    #[test]
+    fn summaries_describe_multi_select() {
+        assert_eq!(group_by_summary(&[]), "None");
+        assert_eq!(
+            group_by_summary(&[GroupBy::Tag, GroupBy::Folder]),
+            "Folder, Tag"
+        );
+        assert_eq!(folder_filter_summary(&[]), ALL_FOLDERS_LABEL);
+        assert_eq!(folder_filter_summary(&[String::new()]), "Root");
+        assert_eq!(
+            folder_filter_summary(&["cats".into(), "dogs".into()]),
+            "cats, dogs"
+        );
+        assert_eq!(
+            folder_filter_summary(&["a".into(), "b".into(), "c".into(), "d".into()]),
+            "4 folders"
+        );
     }
 }
