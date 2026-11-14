@@ -24,7 +24,7 @@ System packages (AUR, Flatpak) already ship those files under `/usr/share`.
 
 ### Flatpak
 
-Packaging lives in [`packaging/flatpak/`](packaging/flatpak/). Build locally with `flatpak-builder`, or install from Flathub after the submission is accepted. The Flatpak needs host access so it can run `swww` / `awww` and your `post_command`.
+Packaging lives in [`packaging/flatpak/`](packaging/flatpak/). Build locally with `flatpak-builder`, or install from Flathub after the submission is accepted. The Flatpak needs host access so it can run `swww` / `awww` and your `post_command`. Release automation (crates.io + Flathub) is documented in [`packaging/RELEASE.md`](packaging/RELEASE.md).
 
 ### Arch Linux (AUR)
 

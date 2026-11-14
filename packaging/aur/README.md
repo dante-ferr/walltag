@@ -44,6 +44,9 @@ If the package name is taken, pick another name or contact the existing maintain
 
 ## Later releases
 
+AUR stays manual (no suitable CI API). Full release checklist:
+[`packaging/RELEASE.md`](../RELEASE.md).
+
 1. Bump `pkgver` / `pkgrel` in `PKGBUILD`.
 2. Tag the matching release on GitHub (`v$pkgver`).
 3. Run `updpkgsums` and regenerate `.SRCINFO`.

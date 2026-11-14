@@ -8,6 +8,11 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  FLATHUB_REPO: flathub/io.github.dante_ferr.Walltag
+  FLATHUB_MANIFEST: io.github.dante_ferr.Walltag.yml
+
 jobs:
   github-release:
     runs-on: ubuntu-latest
@@ -20,3 +25,239 @@ jobs:
           generate_release_notes: true
           body_path: packaging/github/RELEASE_NOTES.md
           fail_on_unmatched_files: false
+
+  crates-io:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
+            echo "::notice title=crates.io skipped::CRATES_IO_TOKEN is not set; skipping cargo publish."
+            echo
+            echo "To enable automatic crates.io publishes:"
+            echo "  1. Create a token at https://crates.io/settings/tokens"
+            echo "  2. Add it as repository secret CRATES_IO_TOKEN"
+            echo "     (Settings → Secrets and variables → Actions)"
+            echo "  3. Re-run this job, or publish manually: cargo publish --locked"
+            echo
+            echo "See packaging/RELEASE.md"
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            libglib2.0-dev
+          cargo publish --locked
+
+  flatpak-cargo-sources:
+    runs-on: ubuntu-latest
+    outputs:
+      lock_changed: ${{ steps.compare.outputs.lock_changed }}
+      sources_stale: ${{ steps.check.outputs.sources_stale }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compare Cargo.lock to previous tag
+        id: compare
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          prev="$(git tag -l 'v*' --sort=-v:refname | grep -vxF "${tag}" | head -n1 || true)"
+          if [ -z "${prev}" ]; then
+            echo "No previous v* tag; treating Cargo.lock as unchanged for regen purposes."
+            echo "lock_changed=false" >> "${GITHUB_OUTPUT}"
+            echo "previous_tag=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "Previous tag: ${prev}"
+          echo "previous_tag=${prev}" >> "${GITHUB_OUTPUT}"
+          if git diff --quiet "${prev}" "${tag}" -- Cargo.lock; then
+            echo "Cargo.lock unchanged since ${prev}"
+            echo "lock_changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "Cargo.lock changed since ${prev}"
+            echo "lock_changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Install Python deps for cargo-sources generator
+        run: |
+          python3 -m pip install --user aiohttp tomlkit 'PyYAML>=6'
+
+      - name: Regenerate and check cargo-sources.json
+        id: check
+        run: |
+          set -euo pipefail
+          ./packaging/flatpak/generate-cargo-sources.sh
+          if git diff --quiet -- packaging/flatpak/cargo-sources.json; then
+            echo "packaging/flatpak/cargo-sources.json matches Cargo.lock"
+            echo "sources_stale=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "::warning title=cargo-sources.json stale::Regenerated packaging/flatpak/cargo-sources.json differs from the committed file."
+            echo "Commit the regenerated file before the next release tag so this repo stays the source of truth."
+            echo "The Flathub job (when enabled) uses the regenerated file."
+            echo "sources_stale=true" >> "${GITHUB_OUTPUT}"
+            git diff --stat -- packaging/flatpak/cargo-sources.json
+          fi
+          # Keep regenerated sources for the Flathub job artifact.
+          mkdir -p /tmp/flatpak-release
+          cp packaging/flatpak/cargo-sources.json /tmp/flatpak-release/
+          cp packaging/flatpak/"${FLATHUB_MANIFEST}" /tmp/flatpak-release/
+
+      - name: Upload Flatpak release inputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: flatpak-release-inputs
+          path: /tmp/flatpak-release/
+          if-no-files-found: error
+
+  flathub:
+    needs: [flatpak-cargo-sources]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Flatpak release inputs
+        uses: actions/download-artifact@v4
+        with:
+          name: flatpak-release-inputs
+          path: /tmp/flatpak-release
+
+      - name: Update Flathub app repo
+        env:
+          FLATHUB_TOKEN: ${{ secrets.FLATHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          print_manual() {
+            echo
+            echo "Manual Flathub update for ${TAG} (commit ${COMMIT}):"
+            echo "  1. Clone the app repo (after the first Flathub invite):"
+            echo "       git clone git@github.com:${FLATHUB_REPO}.git"
+            echo "  2. Copy packaging/flatpak/${FLATHUB_MANIFEST} and"
+            echo "     packaging/flatpak/cargo-sources.json into that clone"
+            echo "     (or edit tag/commit in the existing manifest)."
+            echo "  3. Set the git source to:"
+            echo "       tag: ${TAG}"
+            echo "       commit: ${COMMIT}"
+            echo "  4. If Cargo.lock changed, run:"
+            echo "       ./packaging/flatpak/generate-cargo-sources.sh"
+            echo "     and copy the new cargo-sources.json."
+            echo "  5. Commit, push to master (or open a PR), and wait for the"
+            echo "     Flathub build."
+            echo
+            echo "First submission (repo does not exist yet): see packaging/RELEASE.md"
+            echo
+          }
+
+          if [ -z "${FLATHUB_TOKEN}" ]; then
+            echo "::notice title=Flathub skipped::FLATHUB_TOKEN is not set; skipping Flathub update."
+            echo
+            echo "To enable automatic Flathub updates:"
+            echo "  1. Accept the Flathub invite to ${FLATHUB_REPO}"
+            echo "  2. Create a GitHub PAT (classic: repo scope, or fine-grained"
+            echo "     with Contents + Pull requests on ${FLATHUB_REPO})"
+            echo "  3. Add it as repository secret FLATHUB_TOKEN"
+            echo "     (Settings → Secrets and variables → Actions)"
+            print_manual
+            exit 0
+          fi
+
+          work="$(mktemp -d)"
+          trap 'rm -rf "${work}"' EXIT
+          export GH_TOKEN="${FLATHUB_TOKEN}"
+
+          if ! gh repo clone "${FLATHUB_REPO}" "${work}/flathub-app" -- --depth 1; then
+            echo "::warning title=Flathub repo missing::Could not clone ${FLATHUB_REPO}."
+            echo "The app may not be accepted on Flathub yet, or the token lacks access."
+            print_manual
+            exit 0
+          fi
+
+          cd "${work}/flathub-app"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          branch="update-${TAG}"
+          if git ls-remote --exit-code --heads origin "${branch}" >/dev/null 2>&1; then
+            git fetch --depth 1 origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            git checkout -B "${branch}" "origin/${branch}"
+          else
+            git checkout -b "${branch}"
+          fi
+
+          cp /tmp/flatpak-release/cargo-sources.json ./cargo-sources.json
+          cp /tmp/flatpak-release/"${FLATHUB_MANIFEST}" ./"${FLATHUB_MANIFEST}"
+
+          # Point the git source at this release tag/commit.
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          path = pathlib.Path(os.environ["FLATHUB_MANIFEST"])
+          text = path.read_text()
+          tag = os.environ["TAG"]
+          commit = os.environ["COMMIT"]
+          text, n_tag = re.subn(
+              r"(?m)^(\s*tag:\s*).*$",
+              rf"\g<1>{tag}",
+              text,
+              count=1,
+          )
+          text, n_commit = re.subn(
+              r"(?m)^(\s*commit:\s*).*$",
+              rf"\g<1>{commit}",
+              text,
+              count=1,
+          )
+          if n_tag != 1 or n_commit != 1:
+              raise SystemExit(
+                  f"expected to rewrite one tag and one commit (got tag={n_tag}, commit={n_commit})"
+              )
+          path.write_text(text)
+          print(f"Updated {path} → tag={tag} commit={commit}")
+          PY
+
+          git add "${FLATHUB_MANIFEST}" cargo-sources.json
+          if git diff --cached --quiet; then
+            echo "Flathub app repo already matches ${TAG} (${COMMIT}); nothing to do."
+            exit 0
+          fi
+
+          git commit -m "Update Walltag to ${TAG}"
+          git push -u origin "${branch}"
+
+          {
+            echo "Automated update from https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            echo
+            echo "- tag: \`${TAG}\`"
+            echo "- commit: \`${COMMIT}\`"
+            echo "- cargo-sources.json regenerated from Cargo.lock when needed"
+            echo
+            echo "Merge this PR to publish on Flathub."
+          } > "${work}/pr-body.md"
+
+          if gh pr view "${branch}" --repo "${FLATHUB_REPO}" >/dev/null 2>&1; then
+            echo "Pull request for ${branch} already exists; branch updated."
+            gh pr view "${branch}" --repo "${FLATHUB_REPO}" --json url -q .url
+          else
+            gh pr create --repo "${FLATHUB_REPO}" \
+              --base master \
+              --head "${branch}" \
+              --title "Update Walltag to ${TAG}" \
+              --body-file "${work}/pr-body.md"
+          fi
