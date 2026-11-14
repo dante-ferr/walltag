@@ -7,4 +7,5 @@ Icon=io.github.dante_ferr.Walltag
 Terminal=false
 Categories=Graphics;GTK;
 StartupNotify=true
-Keywords=wallpaper;gallery;wayland;
+StartupWMClass=io.github.dante_ferr.Walltag
+Keywords=wallpaper;gallery;wayland;tags;

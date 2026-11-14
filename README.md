@@ -18,6 +18,10 @@ cargo install --path .
 cargo install walltag
 ```
 
+The first GUI launch installs a FreeDesktop `.desktop` entry and icon under
+`~/.local/share/` so Walltag appears in app launchers (rofi, GNOME, etc.).
+System packages (AUR, Flatpak) already ship those files under `/usr/share`.
+
 ### Flatpak
 
 Packaging lives in [`packaging/flatpak/`](packaging/flatpak/). Build locally with `flatpak-builder`, or install from Flathub after the submission is accepted. The Flatpak needs host access so it can run `swww` / `awww` and your `post_command`.

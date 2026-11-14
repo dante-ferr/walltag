@@ -37,7 +37,12 @@ const DEFAULT_WINDOW_WIDTH: i32 = 1080;
 const DEFAULT_WINDOW_HEIGHT: i32 = 960;
 
 pub fn launch(config: AppConfig) -> Result<()> {
+    if let Err(err) = crate::desktop_install::ensure_user_launcher() {
+        tracing::warn!("Could not install desktop launcher: {err:#}");
+    }
+
     let app = Application::builder().application_id(APP_ID).build();
+    gtk4::Window::set_default_icon_name(APP_ID);
 
     let config = Rc::new(RefCell::new(config));
     app.connect_activate(move |app| {
