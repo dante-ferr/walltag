@@ -4,6 +4,7 @@ mod color;
 mod dim_cache;
 mod filter;
 mod gallery;
+mod gui_scale;
 mod masonry;
 mod sidebar;
 mod theming;

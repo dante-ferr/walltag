@@ -1,28 +1,29 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::Result;
 use libadwaita::prelude::*;
 use libadwaita::{
-    Application, ApplicationWindow, EntryRow, SpinRow, StyleManager, ToastOverlay,
+    Application, ApplicationWindow, EntryRow, HeaderBar, SpinRow, StyleManager, ToastOverlay,
+    ToolbarView,
 };
 use gtk4::gdk::Display;
 use gtk4::gio;
 use gtk4::prelude::{ButtonExt, GtkWindowExt};
 use gtk4::{
     Align, Box as GtkBox, Button, CheckButton, CssProvider, DropDown, Editable, EventControllerKey,
-    FileDialog, GestureClick, ListBoxRow, Orientation, Overlay, Paned, PickFlags, Popover,
-    PropagationPhase, Scale, Scrollbar, SpinButton, Switch, ToggleButton, Widget,
-    STYLE_PROVIDER_PRIORITY_USER,
+    FileDialog, GestureClick, ListBoxRow, Orientation, Paned, PickFlags, Popover, PropagationPhase,
+    Scale, Scrollbar, SpinButton, Switch, ToggleButton, Widget, STYLE_PROVIDER_PRIORITY_USER,
 };
 
-use crate::config::{ConfigPaths, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
+use crate::config::{sidebar_limits, ConfigPaths};
 use crate::metadata::MetadataStore;
 use crate::scan::scan_wallpapers;
 use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
 use crate::ui::sidebar::Sidebar;
 use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryView};
+use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
 use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
 
@@ -74,13 +75,19 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     let toast_overlay = ToastOverlay::new();
 
     let sidebar = Sidebar::new(config.clone(), gallery.clone(), model.clone());
-    sidebar.widget.set_size_request(MIN_SIDEBAR_WIDTH, -1);
+    {
+        let (min, _) = sidebar_limits(config.borrow().gui_scale);
+        sidebar.widget.set_size_request(min, -1);
+    }
+
     let sidebar_visible = config.borrow().sidebar_visible;
     let split = Paned::builder()
         .orientation(Orientation::Horizontal)
         .start_child(&sidebar.widget)
         .resize_start_child(false)
-        // Open sidebar: GtkPaned enforces the size request. Hidden: allow collapse to 0.
+        // Shrink only while hidden, so a drag or a narrow window cannot push the
+        // open sidebar below its size request. GtkPaned applies that limit itself;
+        // setting the position from notify::position is overwritten.
         .shrink_start_child(!sidebar_visible)
         .resize_end_child(true)
         .shrink_end_child(true)
@@ -90,18 +97,21 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
             0
         })
         .build();
+    // While a show/hide animation runs, ignore drag-driven width saves.
+    let animating_sidebar = Rc::new(Cell::new(false));
     {
-        // Keep the width in memory while dragging and write it once the drag settles.
         let config = config.clone();
-        let sidebar_widget = sidebar.widget.clone();
+        let animating = animating_sidebar.clone();
         let pending: Rc<RefCell<Option<gtk4::glib::SourceId>>> = Rc::new(RefCell::new(None));
         split.connect_position_notify(move |split| {
-            if !sidebar_widget.is_visible() {
+            if animating.get() {
                 return;
             }
             let raw = split.position();
-            let width = raw.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+            let (min, max) = sidebar_limits(config.borrow().gui_scale);
+            let width = raw.clamp(min, max);
             if raw != width {
+                // The paned writes the dragged position after this signal returns.
                 if !split.shrinks_start_child() {
                     let split = split.clone();
                     gtk4::glib::idle_add_local_once(move || {
@@ -135,54 +145,67 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
         });
     }
 
-    // No top bar: the sidebar toggle floats over the gallery corner.
     let sidebar_toggle = ToggleButton::builder()
         .icon_name("sidebar-show-symbolic")
         .tooltip_text("Show or hide the sidebar (F9)")
-        .halign(Align::Start)
-        .valign(Align::Start)
-        .margin_top(18)
-        .margin_start(18)
-        .css_classes(["osd", "circular"])
-        .build();
-    sidebar.widget.set_visible(config.borrow().sidebar_visible);
-    sidebar
-        .widget
-        .bind_property("visible", &sidebar_toggle, "active")
-        .bidirectional()
-        .sync_create()
+        .active(sidebar_visible)
+        .css_classes(["flat", "circular", "walltag-topbar-btn"])
         .build();
     {
         let config = config.clone();
         let split = split.clone();
-        sidebar.widget.connect_notify_local(Some("visible"), move |widget, _| {
-            let visible = widget.is_visible();
-            split.set_shrink_start_child(!visible);
-            if visible {
-                split.set_position(
-                    config
-                        .borrow()
-                        .sidebar_width
-                        .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
-                );
+        let animating = animating_sidebar.clone();
+        sidebar_toggle.connect_toggled(move |btn| {
+            let show = btn.is_active();
+            let target = if show {
+                let cfg = config.borrow();
+                let (min, max) = sidebar_limits(cfg.gui_scale);
+                cfg.sidebar_width.clamp(min, max)
             } else {
-                split.set_position(0);
+                0
+            };
+            // Allow the divider to travel below the minimum while it animates shut
+            // or open. The animation locks the minimum again once the sidebar is open.
+            if !show {
+                split.set_shrink_start_child(true);
             }
-            if config.borrow().sidebar_visible == visible {
-                return;
-            }
-            config.borrow_mut().sidebar_visible = visible;
-            if let Err(err) = ConfigPaths::save(&config.borrow()) {
-                tracing::error!("Failed to save config: {err:#}");
+            let open_min = sidebar_limits(config.borrow().gui_scale).0;
+            animate_paned_position(&split, target, &animating, open_min);
+            if config.borrow().sidebar_visible != show {
+                config.borrow_mut().sidebar_visible = show;
+                if let Err(err) = ConfigPaths::save(&config.borrow()) {
+                    tracing::error!("Failed to save config: {err:#}");
+                }
             }
         });
     }
-    let content = Overlay::new();
-    content.set_child(Some(&gallery.root));
-    content.add_overlay(&sidebar_toggle);
-    content.add_overlay(&build_zoom_controls(&gallery.grid));
-    split.set_end_child(Some(&content));
-    toast_overlay.set_child(Some(&split));
+    // Selecting wallpapers opens the sidebar so the Edit section is reachable.
+    {
+        let toggle = sidebar_toggle.clone();
+        let grid = gallery.grid.clone();
+        gallery.grid.connect_selection_changed(move || {
+            if !grid.selected_keys().is_empty() && !toggle.is_active() {
+                toggle.set_active(true);
+            }
+        });
+    }
+
+    let top = HeaderBar::new();
+    top.add_css_class("walltag-topbar");
+    top.set_show_end_title_buttons(true);
+    top.set_title_widget(Some(&GtkBox::new(Orientation::Horizontal, 0)));
+    top.pack_start(&sidebar_toggle);
+    top.pack_end(&build_zoom_controls(&gallery.grid));
+    gallery.spinner.set_valign(Align::Center);
+    top.pack_end(&gallery.spinner);
+
+    split.set_end_child(Some(&gallery.root));
+
+    let shell = ToolbarView::new();
+    shell.add_css_class("walltag-main-shell");
+    shell.add_top_bar(&top);
+    shell.set_content(Some(&split));
+    toast_overlay.set_child(Some(&shell));
 
     let window = ApplicationWindow::builder()
         .application(app)
@@ -196,14 +219,25 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
 
     let toggle_action = gio::SimpleAction::new("toggle-sidebar", None);
     {
-        let sidebar_widget = sidebar.widget.clone();
-        toggle_action
-            .connect_activate(move |_, _| sidebar_widget.set_visible(!sidebar_widget.is_visible()));
+        let toggle = sidebar_toggle.clone();
+        toggle_action.connect_activate(move |_, _| toggle.set_active(!toggle.is_active()));
     }
     window.add_action(&toggle_action);
     app.set_accels_for_action("win.toggle-sidebar", &["F9"]);
 
     wire_zoom_actions(app, &window, &gallery.grid);
+    let gui_scale_provider =
+        install_scale_provider(&Display::default().expect("default display"));
+    wire_gui_scale(
+        app,
+        &window,
+        &[sidebar.widget.clone(), top.upcast()],
+        Some(&sidebar.content),
+        &sidebar.widget,
+        &split,
+        config.clone(),
+        &gui_scale_provider,
+    );
     wire_clear_selection(&window, &gallery.grid);
 
     wire_wallpaper_folder_picker(&sidebar.pick_folder, &window, config, model, gallery);
@@ -212,29 +246,67 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     Ok(())
 }
 
-/// Floating zoom buttons in the top-right corner of the gallery: zoom out, reset (shows the
-/// current percentage), zoom in.
+/// Keeps an open sidebar at or above the scaled minimum. A hidden sidebar may shrink to 0.
+fn lock_open_sidebar(split: &Paned, target: i32, open_min: i32) {
+    split.set_shrink_start_child(target < open_min);
+    split.queue_resize();
+}
+
+/// Animates the paned divider to `target` so hide/show frees or restores gallery space.
+fn animate_paned_position(split: &Paned, target: i32, animating: &Rc<Cell<bool>>, open_min: i32) {
+    const DURATION_MS: f64 = 220.0;
+    let start = split.position() as f64;
+    let end = target as f64;
+    // The divider has to pass through widths below the minimum while it opens or closes.
+    if start < f64::from(open_min) || end < f64::from(open_min) {
+        split.set_shrink_start_child(true);
+    }
+    if (start - end).abs() < 0.5 {
+        split.set_position(target);
+        animating.set(false);
+        lock_open_sidebar(split, target, open_min);
+        return;
+    }
+    animating.set(true);
+    let split = split.clone();
+    let animating = animating.clone();
+    let t0 = std::time::Instant::now();
+    split.add_tick_callback(move |split, _| {
+        let t = (t0.elapsed().as_secs_f64() * 1000.0 / DURATION_MS).min(1.0);
+        // Ease-out cubic.
+        let eased = 1.0 - (1.0 - t).powi(3);
+        let pos = (start + (end - start) * eased).round() as i32;
+        split.set_position(pos);
+        if t >= 1.0 {
+            split.set_position(target);
+            animating.set(false);
+            lock_open_sidebar(split, target, open_min);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
+/// Compact zoom controls for the thin top bar: out, discrete percent, in.
 fn build_zoom_controls(grid: &MasonryGrid) -> GtkBox {
     let out = Button::builder()
         .icon_name("zoom-out-symbolic")
         .tooltip_text("Zoom out (Ctrl+-)")
+        .css_classes(["flat", "walltag-topbar-btn"])
         .build();
     let reset = Button::builder()
-        .label("100%")
+        .label("100")
         .tooltip_text("Reset zoom (Ctrl+0)")
+        .css_classes(["flat", "walltag-zoom-label"])
         .build();
     let zoom_in = Button::builder()
         .icon_name("zoom-in-symbolic")
         .tooltip_text("Zoom in (Ctrl++)")
+        .css_classes(["flat", "walltag-topbar-btn"])
         .build();
 
     let controls = GtkBox::new(Orientation::Horizontal, 0);
-    controls.set_halign(Align::End);
-    controls.set_valign(Align::Start);
-    controls.set_margin_top(18);
-    controls.set_margin_end(18);
-    controls.add_css_class("osd");
-    controls.add_css_class("linked");
     controls.add_css_class("walltag-zoom-controls");
     controls.append(&out);
     controls.append(&reset);
@@ -243,7 +315,7 @@ fn build_zoom_controls(grid: &MasonryGrid) -> GtkBox {
     let refresh = {
         let (out, reset, zoom_in) = (out.clone(), reset.clone(), zoom_in.clone());
         move |zoom: f32| {
-            reset.set_label(&format!("{}%", (zoom * 100.0).round() as i32));
+            reset.set_label(&format!("{}", (zoom * 100.0).round() as i32));
             out.set_sensitive(zoom > MIN_ZOOM + f32::EPSILON);
             zoom_in.set_sensitive(zoom < MAX_ZOOM - f32::EPSILON);
         }

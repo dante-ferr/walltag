@@ -95,6 +95,63 @@ impl MetadataStore {
         }
     }
 
+    /// Removes each of `tags` from every wallpaper in `keys`. Missing tags are ignored.
+    pub fn remove_tags(&mut self, keys: &[String], tags: &[String]) {
+        let remove: Vec<String> = tags
+            .iter()
+            .map(|t| t.trim().trim_start_matches('#').to_lowercase())
+            .filter(|t| !t.is_empty())
+            .collect();
+        if remove.is_empty() {
+            return;
+        }
+        for key in keys {
+            let mut current = self.record_for_key(key).tags;
+            current.retain(|t| !remove.iter().any(|r| r == t));
+            self.set_tags(key.clone(), current);
+        }
+    }
+
+    /// Sets the favorite flag on every wallpaper in `keys`.
+    pub fn set_favorite(&mut self, keys: &[String], favorite: bool) {
+        for key in keys {
+            self.data.wallpapers.entry(key.clone()).or_default().favorite = favorite;
+        }
+    }
+
+    /// Tags present on every wallpaper in `keys`. Empty when `keys` is empty.
+    pub fn shared_tags(&self, keys: &[String]) -> Vec<String> {
+        let mut iter = keys.iter();
+        let Some(first) = iter.next() else {
+            return Vec::new();
+        };
+        let mut shared = self.record_for_key(first).tags;
+        for key in iter {
+            let tags = self.record_for_key(key).tags;
+            shared.retain(|t| tags.iter().any(|u| u == t));
+            if shared.is_empty() {
+                break;
+            }
+        }
+        shared
+    }
+
+    /// Favorite state for `keys`: `Some(true)` / `Some(false)` when unanimous, `None` when mixed
+    /// or `keys` is empty.
+    pub fn shared_favorite(&self, keys: &[String]) -> Option<bool> {
+        let mut iter = keys.iter();
+        let Some(first) = iter.next() else {
+            return None;
+        };
+        let value = self.record_for_key(first).favorite;
+        for key in iter {
+            if self.record_for_key(key).favorite != value {
+                return None;
+            }
+        }
+        Some(value)
+    }
+
     pub fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
@@ -156,5 +213,39 @@ mod tests {
         let mut store = MetadataStore::open(dir.path().join("m.json")).unwrap();
         store.add_tags(&["a.png".to_string()], &["  ".to_string()]);
         assert!(store.data().wallpapers.is_empty());
+    }
+
+    #[test]
+    fn shared_tags_are_intersection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MetadataStore::open(dir.path().join("m.json")).unwrap();
+        store.set_tags("a.png", vec!["dark".into(), "night".into()]);
+        store.set_tags("b.png", vec!["dark".into(), "city".into()]);
+        assert_eq!(
+            store.shared_tags(&["a.png".into(), "b.png".into()]),
+            vec!["dark"]
+        );
+    }
+
+    #[test]
+    fn remove_tags_from_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("m.json");
+        let mut store = MetadataStore::open(&path).unwrap();
+        store.set_tags("a.png", vec!["dark".into(), "night".into()]);
+        store.set_tags("b.png", vec!["dark".into()]);
+        store.remove_tags(&["a.png".into(), "b.png".into()], &["dark".into()]);
+        assert_eq!(store.record_for_key("a.png").tags, vec!["night"]);
+        assert!(store.record_for_key("b.png").tags.is_empty());
+    }
+
+    #[test]
+    fn shared_favorite_detects_mixed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MetadataStore::open(dir.path().join("m.json")).unwrap();
+        store.set_favorite(&["a.png".into()], true);
+        store.set_favorite(&["b.png".into()], false);
+        assert_eq!(store.shared_favorite(&["a.png".into()]), Some(true));
+        assert_eq!(store.shared_favorite(&["a.png".into(), "b.png".into()]), None);
     }
 }

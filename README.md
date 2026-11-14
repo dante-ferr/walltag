@@ -41,16 +41,9 @@ cargo run -- --restore
 
 Set log verbosity with `RUST_LOG`, for example `RUST_LOG=walltag=debug`.
 
-## Gallery search
+## Sidebar
 
-The sidebar **Browse** section includes:
-
-- Filename search
-- **Group by** None, Folder (workspace), or Tag (section headers in the grid)
-- **Tag** and **Folder** filters
-- **Random** wallpaper from the current filtered set
-
-Tag assignment is in the sidebar **Edit** section (select tiles with right-click or drag).
+**Browse** has the wallpaper folder button, filename search, folder filter, and random pick. **Gallery** has group-by, sort, tag filter, and file-name labels. **Edit** assigns tags to the selected tiles (right-click or drag).
 
 ## Status
 

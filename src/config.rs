@@ -155,6 +155,9 @@ pub struct AppConfig {
     /// Gallery zoom factor (1.0 = 100%).
     #[serde(default = "default_zoom")]
     pub zoom: f32,
+    /// Sidebar and top bar scale (1.0 = 100%). Gallery tile zoom is separate (`zoom`).
+    #[serde(default = "default_gui_scale")]
+    pub gui_scale: f32,
     /// Whether the sidebar is visible.
     #[serde(default = "default_true")]
     pub sidebar_visible: bool,
@@ -217,7 +220,7 @@ pub enum GroupBy {
     None,
     /// Group by subfolder relative to the wallpaper root ("workspace").
     Folder,
-    /// Group by tag. Each wallpaper appears under its first tag, or Untagged.
+    /// Group by tag. Each wallpaper appears under every tag it has, or Untagged.
     Tag,
 }
 
@@ -241,11 +244,26 @@ impl GroupBy {
     }
 }
 
-pub const MIN_SIDEBAR_WIDTH: i32 = 260;
-pub const MAX_SIDEBAR_WIDTH: i32 = 640;
+/// Sidebar paned limits at GUI scale 1.0 (logical px).
+pub const BASE_MIN_SIDEBAR_WIDTH: i32 = 300;
+pub const BASE_MAX_SIDEBAR_WIDTH: i32 = 640;
+
+/// Unscaled limits; prefer [`sidebar_limits`] when `gui_scale` is known.
+pub const MIN_SIDEBAR_WIDTH: i32 = BASE_MIN_SIDEBAR_WIDTH;
+pub const MAX_SIDEBAR_WIDTH: i32 = BASE_MAX_SIDEBAR_WIDTH;
+
+/// Minimum and maximum sidebar width for the current GUI scale.
+pub fn sidebar_limits(gui_scale: f32) -> (i32, i32) {
+    const MIN_SCALE: f32 = 0.75;
+    const MAX_SCALE: f32 = 1.75;
+    let s = gui_scale.clamp(MIN_SCALE, MAX_SCALE);
+    let min = (BASE_MIN_SIDEBAR_WIDTH as f32 * s).round() as i32;
+    let max = (BASE_MAX_SIDEBAR_WIDTH as f32 * s).round() as i32;
+    (min, max.max(min))
+}
 
 fn default_sidebar_width() -> i32 {
-    300
+    BASE_MIN_SIDEBAR_WIDTH
 }
 
 fn default_transition_secs() -> f32 {
@@ -253,6 +271,10 @@ fn default_transition_secs() -> f32 {
 }
 
 fn default_zoom() -> f32 {
+    1.0
+}
+
+fn default_gui_scale() -> f32 {
     1.0
 }
 
@@ -277,6 +299,7 @@ impl Default for AppConfig {
             filter_tag: None,
             filter_folder: None,
             zoom: default_zoom(),
+            gui_scale: default_gui_scale(),
             sidebar_visible: true,
         }
     }
@@ -288,8 +311,10 @@ impl AppConfig {
         if let Some(css) = &self.custom_css {
             self.custom_css = Some(expand_home(css)?);
         }
-        self.sidebar_width = self.sidebar_width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        let (min, max) = sidebar_limits(self.gui_scale);
+        self.sidebar_width = self.sidebar_width.clamp(min, max);
         self.zoom = self.zoom.clamp(0.4, 3.0);
+        self.gui_scale = self.gui_scale.clamp(0.75, 1.75);
         Ok(())
     }
 
@@ -375,13 +400,14 @@ mod tests {
             serde_json::from_str(r#"{"wallpaper_root":"/x","backend":"awww"}"#).unwrap();
         assert_eq!(cfg.monitor, None);
         assert_eq!(cfg.awww, AwwwOptions::default());
-        assert_eq!(cfg.sidebar_width, 300);
+        assert_eq!(cfg.sidebar_width, BASE_MIN_SIDEBAR_WIDTH);
         assert!(!cfg.show_filenames);
         assert_eq!(cfg.sort_by, SortBy::NameAsc);
         assert!(cfg.search_query.is_empty());
         assert_eq!(cfg.filter_tag, None);
         assert_eq!(cfg.filter_folder, None);
         assert_eq!(cfg.zoom, 1.0);
+        assert_eq!(cfg.gui_scale, 1.0);
         assert!(cfg.sidebar_visible);
     }
 
@@ -404,10 +430,18 @@ mod tests {
         let mut cfg: AppConfig =
             serde_json::from_str(r#"{"wallpaper_root":"/x","sidebar_width":5000}"#).unwrap();
         cfg.expand_paths().unwrap();
-        assert_eq!(cfg.sidebar_width, MAX_SIDEBAR_WIDTH);
+        let (min, max) = sidebar_limits(1.0);
+        assert_eq!(cfg.sidebar_width, max);
         cfg.sidebar_width = 1;
         cfg.expand_paths().unwrap();
-        assert_eq!(cfg.sidebar_width, MIN_SIDEBAR_WIDTH);
+        assert_eq!(cfg.sidebar_width, min);
+    }
+
+    #[test]
+    fn sidebar_limits_follow_gui_scale() {
+        let (min, max) = sidebar_limits(1.2);
+        assert_eq!(min, 360);
+        assert_eq!(max, 768);
     }
 
     #[test]

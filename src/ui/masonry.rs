@@ -1287,11 +1287,13 @@ impl MasonryGrid {
             EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
         let weak = grid.downgrade();
         scroll_zoom.connect_scroll(move |controller, _dx, dy| {
-            let ctrl = controller.current_event().is_some_and(|e| {
-                e.modifier_state()
-                    .contains(gdk::ModifierType::CONTROL_MASK)
-            });
-            if !ctrl {
+            let state = controller
+                .current_event()
+                .map(|e| e.modifier_state())
+                .unwrap_or(gdk::ModifierType::empty());
+            let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+            let super_ = state.contains(gdk::ModifierType::SUPER_MASK);
+            if !ctrl || super_ {
                 return glib::Propagation::Proceed;
             }
             let Some(grid) = weak.upgrade() else {

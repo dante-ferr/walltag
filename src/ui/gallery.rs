@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use gtk4::prelude::*;
-use gtk4::{gio, glib, Box, Label, Orientation, PolicyType, ScrolledWindow, SearchEntry};
+use gtk4::{gio, glib, Box, Label, Orientation, PolicyType, ScrolledWindow, SearchEntry, Spinner};
 
 use crate::backends::ApplyOptions;
 use crate::metadata::MetadataStore;
@@ -105,9 +105,12 @@ pub struct GalleryView {
     /// Not placed in the gallery; the sidebar hosts it.
     pub search: SearchEntry,
     pub grid: MasonryGrid,
+    /// Shown in the window top bar while scans or hue sampling run.
+    pub spinner: Spinner,
     model: GalleryModel,
     dimensions: Dimensions,
     generation: Rc<Cell<u64>>,
+    busy: Rc<Cell<u32>>,
     /// Invoked after the visible set changes so the sidebar can refresh filter lists.
     on_repopulated: Rc<RefCell<Vec<Rc<dyn Fn()>>>>,
 }
@@ -115,16 +118,21 @@ pub struct GalleryView {
 impl GalleryView {
     pub fn new(model: GalleryModel) -> Self {
         let root = Box::new(Orientation::Vertical, 0);
-        root.set_margin_top(12);
-        root.set_margin_bottom(12);
-        root.set_margin_start(12);
-        root.set_margin_end(12);
+        root.set_margin_top(8);
+        root.set_margin_bottom(8);
+        root.set_margin_start(8);
+        root.set_margin_end(8);
         root.set_vexpand(true);
         root.add_css_class("walltag-gallery-root");
 
         let search = SearchEntry::new();
         search.set_placeholder_text(Some("Search by filename…"));
         search.set_hexpand(true);
+
+        let spinner = Spinner::new();
+        spinner.set_tooltip_text(Some("Loading…"));
+        spinner.add_css_class("walltag-loading");
+        spinner.set_visible(false);
 
         let scroll = ScrolledWindow::builder()
             .vexpand(true)
@@ -139,13 +147,32 @@ impl GalleryView {
             root,
             search,
             grid,
+            spinner,
             model,
             dimensions: Rc::new(RefCell::new(HashMap::new())),
             generation: Rc::new(Cell::new(0)),
+            busy: Rc::new(Cell::new(0)),
             on_repopulated: Rc::new(RefCell::new(Vec::new())),
         };
         view.wire_filters();
         view
+    }
+
+    fn set_busy(&self, busy: bool) {
+        let n = self.busy.get();
+        let next = if busy {
+            n.saturating_add(1)
+        } else {
+            n.saturating_sub(1)
+        };
+        self.busy.set(next);
+        if next > 0 {
+            self.spinner.set_visible(true);
+            self.spinner.start();
+        } else {
+            self.spinner.stop();
+            self.spinner.set_visible(false);
+        }
     }
 
     pub fn connect_repopulated<F: Fn() + 'static>(&self, f: F) {
@@ -164,14 +191,31 @@ impl GalleryView {
         );
         self.notify_repopulated();
 
+        let needs_colors = self.model.filter.borrow().sort_by == SortBy::Hue
+            && self
+                .model
+                .sort_data
+                .borrow()
+                .missing_colors(&self.model.entries.borrow())
+                .len()
+                > 0;
+        if !needs_colors {
+            return;
+        }
+
+        self.set_busy(true);
         let grid = self.grid.clone();
         let model = self.model.clone();
         let dimensions = self.dimensions.clone();
         let current = self.generation.clone();
         let generation = current.get();
         let on_repopulated = self.on_repopulated.clone();
+        let busy = self.busy.clone();
+        let spinner = self.spinner.clone();
         glib::spawn_future_local(async move {
-            if !model.load_colors(&current, generation).await {
+            let updated = model.load_colors(&current, generation).await;
+            end_busy(&busy, &spinner);
+            if !updated {
                 return;
             }
             if populate(&grid, &model, &dimensions.borrow(), false) {
@@ -258,20 +302,25 @@ impl GalleryView {
         populate(&self.grid, &self.model, &self.dimensions.borrow(), true);
         self.notify_repopulated();
 
+        self.set_busy(true);
         let grid = self.grid.clone();
         let model = self.model.clone();
         let dimensions = self.dimensions.clone();
         let current = self.generation.clone();
         let on_repopulated = self.on_repopulated.clone();
+        let busy = self.busy.clone();
+        let spinner = self.spinner.clone();
         glib::spawn_future_local(async move {
             let root_for_probe = root.clone();
             let Ok((found, stats)) =
                 gio::spawn_blocking(move || resolve_dimensions(&root_for_probe, &probe_input))
                     .await
             else {
+                end_busy(&busy, &spinner);
                 return;
             };
             if current.get() != generation {
+                end_busy(&busy, &spinner);
                 return;
             }
             *dimensions.borrow_mut() = found;
@@ -281,10 +330,9 @@ impl GalleryView {
                     cb();
                 }
             }
-            if !model.load_colors(&current, generation).await {
-                return;
-            }
-            if current.get() != generation {
+            let colors_updated = model.load_colors(&current, generation).await;
+            end_busy(&busy, &spinner);
+            if !colors_updated || current.get() != generation {
                 return;
             }
             if populate(&grid, &model, &dimensions.borrow(), false) {
@@ -349,7 +397,7 @@ fn populate(
                     None => (FALLBACK_ASPECT, 0),
                 };
                 let record = metadata.record_for_key(&wp.relative_key);
-                let tooltip = tooltip_text(&wp.file_name, &record.tags);
+                let tooltip = item_tooltip(&wp.file_name, &record.tags, record.favorite);
                 GridItem {
                     key: wp.relative_key.clone(),
                     path: wp.absolute.clone(),
@@ -370,11 +418,29 @@ fn populate(
     }
 }
 
+fn end_busy(busy: &Cell<u32>, spinner: &Spinner) {
+    let next = busy.get().saturating_sub(1);
+    busy.set(next);
+    if next == 0 {
+        spinner.stop();
+        spinner.set_visible(false);
+    }
+}
+
 fn tooltip_text(file_name: &str, tags: &[String]) -> String {
     if tags.is_empty() {
         file_name.to_owned()
     } else {
         format!("{}\n{}", file_name, tags.join(" · "))
+    }
+}
+
+fn item_tooltip(file_name: &str, tags: &[String], favorite: bool) -> String {
+    let base = tooltip_text(file_name, tags);
+    if favorite {
+        format!("{base}\n★ Favorite")
+    } else {
+        base
     }
 }
 
@@ -390,13 +456,54 @@ pub fn assign_tags(
     let mut metadata = metadata.borrow_mut();
     metadata.add_tags(keys, tags);
     let saved = metadata.save();
+    refresh_tooltips(grid, model, &metadata, keys);
+    saved
+}
 
+/// Removes `tags` from the wallpapers in `keys`, saves metadata, and refreshes tooltips.
+pub fn remove_tags(
+    grid: &MasonryGrid,
+    model: &GalleryModel,
+    keys: &[String],
+    tags: &[String],
+) -> anyhow::Result<()> {
+    let metadata = model.metadata();
+    let mut metadata = metadata.borrow_mut();
+    metadata.remove_tags(keys, tags);
+    let saved = metadata.save();
+    refresh_tooltips(grid, model, &metadata, keys);
+    saved
+}
+
+/// Sets the favorite flag on `keys`, saves metadata, and refreshes tooltips.
+pub fn set_favorite(
+    grid: &MasonryGrid,
+    model: &GalleryModel,
+    keys: &[String],
+    favorite: bool,
+) -> anyhow::Result<()> {
+    let metadata = model.metadata();
+    let mut metadata = metadata.borrow_mut();
+    metadata.set_favorite(keys, favorite);
+    let saved = metadata.save();
+    refresh_tooltips(grid, model, &metadata, keys);
+    saved
+}
+
+fn refresh_tooltips(
+    grid: &MasonryGrid,
+    model: &GalleryModel,
+    metadata: &crate::metadata::MetadataStore,
+    keys: &[String],
+) {
     let entries = model.entries();
     for entry in entries.borrow().iter().filter(|e| keys.contains(&e.relative_key)) {
         let record = metadata.record_for_key(&entry.relative_key);
-        grid.update_tooltip(&entry.relative_key, tooltip_text(&entry.file_name, &record.tags));
+        grid.update_tooltip(
+            &entry.relative_key,
+            item_tooltip(&entry.file_name, &record.tags, record.favorite),
+        );
     }
-    saved
 }
 
 /// Applies a random wallpaper from the currently filtered set (ignoring section headers).
@@ -410,10 +517,12 @@ pub fn set_random_wallpaper(model: &GalleryModel) -> anyhow::Result<Option<Strin
         &filter,
         &model.sort_data().borrow(),
     );
+    // Deduplicate: multi-tag grouping repeats the same wallpaper under each tag.
+    let mut seen = std::collections::HashSet::new();
     let candidates: Vec<_> = rows
         .into_iter()
         .filter_map(|r| match r {
-            GalleryRow::Wallpaper(wp) => Some(wp),
+            GalleryRow::Wallpaper(wp) => seen.insert(wp.relative_key.clone()).then_some(wp),
             GalleryRow::Header(_) => None,
         })
         .collect();
@@ -472,6 +581,40 @@ pub fn default_app_css() -> &'static str {
     .walltag-gallery-root {
       background: transparent;
     }
+    .walltag-main-shell {
+      --wt-s: 1;
+    }
+    .walltag-topbar {
+      font-size: 14px;
+      min-height: 0;
+      padding: 0 0.143em;
+    }
+    .walltag-topbar windowhandle,
+    .walltag-topbar headerbar {
+      min-height: 2em;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
+    .walltag-topbar-btn {
+      min-width: 1.571em;
+      min-height: 1.571em;
+      padding: 0.071em;
+    }
+    .walltag-zoom-controls {
+      border-spacing: 0;
+    }
+    .walltag-zoom-label {
+      min-width: 1.714em;
+      min-height: 1.571em;
+      padding: 0 0.071em;
+      font-size: 0.7em;
+      font-weight: 600;
+      opacity: 0.65;
+      letter-spacing: 0.02em;
+    }
+    .walltag-loading {
+      margin-end: 0.286em;
+    }
     .walltag-thumb {
       background: alpha(@window_fg_color, 0.06);
     }
@@ -488,41 +631,92 @@ pub fn default_app_css() -> &'static str {
       opacity: 0.85;
     }
     /* walltag-css-start */
-    /* Compact sidebar: tighter rows, headers, and gaps between groups. */
+    /* Sidebar shell: slight plane separation from the gallery. */
+    .walltag-sidebar-shell {
+      font-size: 14px;
+      background-color: alpha(@window_bg_color, 1.0);
+      background-image: linear-gradient(
+        180deg,
+        alpha(@window_fg_color, 0.035),
+        alpha(@window_fg_color, 0.012) 40%,
+        transparent 100%
+      );
+    }
+    /* Sidebar chrome: inset groups, roomy section titles, compact rows. */
+    .walltag-sidebar {
+      background: transparent;
+      margin: 0.857em 1em 0.857em 1.143em;
+    }
     .walltag-sidebar preferencesgroup > box {
-      border-spacing: 4px;
+      border-spacing: 0.571em;
+    }
+    /* Section titles sit inset from the pane edge instead of flush left. */
+    .walltag-sidebar preferencesgroup > box > box.header,
+    .walltag-sidebar preferencesgroup > box > box:first-child {
+      margin-left: 0.286em;
+      margin-right: 0.286em;
+      margin-bottom: 0.143em;
     }
     .walltag-sidebar preferencesgroup > box > box > label.heading {
-      font-size: 0.95em;
+      font-size: 0.72em;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: alpha(@window_fg_color, 0.55);
+      padding: 0.143em 0.286em 0 0.286em;
+    }
+    .walltag-sidebar preferencesgroup > box > box > label.subtitle,
+    .walltag-sidebar preferencesgroup > box label.subtitle {
+      font-size: 0.85em;
+      color: alpha(@window_fg_color, 0.5);
+      padding: 0 0.286em;
+    }
+    /* Soft card behind each preferences list. */
+    .walltag-sidebar preferencesgroup > box > list,
+    .walltag-sidebar preferencesgroup list.boxed-list {
+      background-color: alpha(@window_fg_color, 0.045);
+      border: 1px solid alpha(@window_fg_color, 0.06);
+      border-radius: 0.857em;
+      padding: 0.143em 0;
+      margin-top: 0.143em;
     }
     .walltag-sidebar row {
       min-height: 0;
+      background: transparent;
+      border-radius: 0.571em;
+      margin: 0.071em 0.286em;
+    }
+    .walltag-sidebar row:hover {
+      background-color: alpha(@window_fg_color, 0.05);
     }
     .walltag-sidebar row > box.header {
-      min-height: 34px;
-      padding: 0 8px;
-      border-spacing: 8px;
+      min-height: 2.571em;
+      padding: 0 0.857em;
+      border-spacing: 0.714em;
     }
     .walltag-sidebar row > box.header > box.title {
-      margin: 3px 0;
+      margin: 0.286em 0;
+    }
+    .walltag-sidebar row > box.header > box.title > label.title {
+      font-weight: 500;
     }
     .walltag-sidebar row.entry {
       min-height: 0;
     }
     .walltag-sidebar row.entry > box.header {
-      padding: 0 8px;
+      padding: 0 0.857em;
     }
     .walltag-sidebar row.spin > box.header {
-      min-height: 34px;
+      min-height: 2.571em;
     }
     .walltag-sidebar row > box.header > box.suffixes button.pill {
       min-height: 0;
-      padding: 3px 14px;
+      padding: 0.286em 1em;
     }
     .walltag-sidebar row > box.header > box.suffixes entry {
       min-height: 0;
-      padding-top: 3px;
-      padding-bottom: 3px;
+      padding-top: 0.214em;
+      padding-bottom: 0.214em;
     }
     /* Dropdown rows: the selected value and arrow never get a hover chip. */
     row.combo > box.header > box.suffixes listview,
@@ -536,19 +730,19 @@ pub fn default_app_css() -> &'static str {
       border: none;
       outline: none;
       min-height: 0;
-      padding: 0 2px;
+      padding: 0 0.143em;
     }
     row.combo > box.header > box.suffixes image.dropdown-arrow,
     row.combo > box.header > box.suffixes image.dropdown-arrow:hover {
-      -gtk-icon-size: 20px;
+      -gtk-icon-size: 1.429em;
       background: none;
       background-color: transparent;
       box-shadow: none;
       border: none;
       padding: 0;
-      margin: 0 2px;
-      min-width: 20px;
-      min-height: 20px;
+      margin: 0 0.143em;
+      min-width: 1.429em;
+      min-height: 1.429em;
     }
     row.combo > box.header > box.suffixes > box,
     row.combo > box.header > box.suffixes > box:hover {
@@ -565,8 +759,8 @@ pub fn default_app_css() -> &'static str {
       padding: 0;
     }
     row.combo popover.menu > contents {
-      padding: 3px;
-      border-radius: 10px;
+      padding: 0.214em;
+      border-radius: 0.714em;
     }
     row.combo popover.menu > contents box,
     row.combo popover.menu > contents scrolledwindow,
@@ -580,10 +774,10 @@ pub fn default_app_css() -> &'static str {
       background-color: transparent;
       min-height: 0;
       padding: 0;
-      border-radius: 6px;
+      border-radius: 0.429em;
     }
     row.combo popover.menu > contents listview > row > box {
-      padding: 5px 10px;
+      padding: 0.357em 0.714em;
       min-height: 0;
     }
     row.combo popover.menu > contents listview > row:hover,

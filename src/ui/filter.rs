@@ -15,6 +15,8 @@ pub use crate::config::{GroupBy, SortBy};
 pub const ROOT_FOLDER_LABEL: &str = "Root";
 /// Label for wallpapers with no tags when grouping by tag.
 pub const UNTAGGED_LABEL: &str = "Untagged";
+/// Label for the favorites section when grouping.
+pub const FAVORITES_LABEL: &str = "Favorites";
 
 /// Active search / filter / group / sort state (persisted via `AppConfig`).
 #[derive(Debug, Clone, Default)]
@@ -298,27 +300,65 @@ pub fn build_rows(
             .collect(),
         GroupBy::Folder => {
             let mut groups: BTreeMap<String, Vec<&WallpaperEntry>> = BTreeMap::new();
-            for wp in filtered {
+            let mut favorites: Vec<&WallpaperEntry> = Vec::new();
+            for wp in &filtered {
+                if metadata.record_for_key(&wp.relative_key).favorite {
+                    favorites.push(*wp);
+                }
                 groups
                     .entry(folder_label(&wp.parent_relative))
                     .or_default()
-                    .push(wp);
+                    .push(*wp);
             }
-            flatten_groups(groups, None, sort, sort_data)
+            flatten_groups_with_favorites(groups, favorites, None, sort, sort_data)
         }
         GroupBy::Tag => {
             let mut groups: BTreeMap<String, Vec<&WallpaperEntry>> = BTreeMap::new();
-            for wp in filtered {
-                let tags = metadata.record_for_key(&wp.relative_key).tags;
-                let label = tags
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| UNTAGGED_LABEL.to_owned());
-                groups.entry(label).or_default().push(wp);
+            let mut favorites: Vec<&WallpaperEntry> = Vec::new();
+            for wp in &filtered {
+                let record = metadata.record_for_key(&wp.relative_key);
+                if record.favorite {
+                    favorites.push(*wp);
+                }
+                if record.tags.is_empty() {
+                    groups
+                        .entry(UNTAGGED_LABEL.to_owned())
+                        .or_default()
+                        .push(*wp);
+                } else {
+                    // Appear under every tag the wallpaper carries.
+                    for tag in &record.tags {
+                        groups.entry(tag.clone()).or_default().push(*wp);
+                    }
+                }
             }
-            flatten_groups(groups, Some(UNTAGGED_LABEL), sort, sort_data)
+            flatten_groups_with_favorites(
+                groups,
+                favorites,
+                Some(UNTAGGED_LABEL),
+                sort,
+                sort_data,
+            )
         }
     }
+}
+
+/// Like [`flatten_groups`], but puts a Favorites section first when it is non-empty.
+fn flatten_groups_with_favorites(
+    groups: BTreeMap<String, Vec<&WallpaperEntry>>,
+    favorites: Vec<&WallpaperEntry>,
+    last: Option<&str>,
+    sort: SortBy,
+    data: &SortData,
+) -> Vec<GalleryRow> {
+    let mut rows = Vec::new();
+    if !favorites.is_empty() {
+        let mut favorites = favorites;
+        favorites.sort_by(|a, b| compare_entries(a, b, sort, data));
+        append_group(&mut rows, FAVORITES_LABEL.to_owned(), favorites);
+    }
+    rows.extend(flatten_groups(groups, last, sort, data));
+    rows
 }
 
 /// Orders `groups` under `sort` (items inside are already sorted). The `last` group, if
@@ -588,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn groups_by_first_tag_and_untagged() {
+    fn groups_by_every_tag_and_untagged() {
         let entries = vec![
             entry("a.png", "", "a.png"),
             entry("b.png", "", "b.png"),
@@ -605,11 +645,46 @@ mod tests {
             },
             &SortData::default(),
         );
-        // Tags are stored sorted, so the first tag is "dark".
-        assert!(matches!(&rows[0], GalleryRow::Header(t) if t == "dark"));
-        assert!(matches!(&rows[1], GalleryRow::Wallpaper(w) if w.relative_key == "a.png"));
-        assert!(matches!(&rows[2], GalleryRow::Header(t) if t == UNTAGGED_LABEL));
-        assert!(matches!(&rows[3], GalleryRow::Wallpaper(w) if w.relative_key == "b.png"));
+        // Multi-tag wallpapers appear under each tag (tags sort alphabetically).
+        assert_eq!(
+            keys(&rows),
+            ["#dark", "a.png", "#night", "a.png", "#Untagged", "b.png"]
+        );
+    }
+
+    #[test]
+    fn favorites_group_comes_first() {
+        let entries = vec![
+            entry("a.png", "", "a.png"),
+            entry("b.png", "", "b.png"),
+            entry("c.png", "", "c.png"),
+        ];
+        let dir = TempDir::new().unwrap();
+        let mut meta = MetadataStore::open(dir.path().join("m.json")).unwrap();
+        meta.set_tags("a.png", vec!["night".into()]);
+        meta.set_tags("b.png", vec!["night".into()]);
+        meta.set_favorite(&["b.png".into()], true);
+        let rows = build_rows(
+            &entries,
+            &meta,
+            &GalleryFilter {
+                group_by: GroupBy::Tag,
+                ..Default::default()
+            },
+            &SortData::default(),
+        );
+        assert_eq!(
+            keys(&rows),
+            [
+                "#Favorites",
+                "b.png",
+                "#night",
+                "a.png",
+                "b.png",
+                "#Untagged",
+                "c.png"
+            ]
+        );
     }
 
     #[test]

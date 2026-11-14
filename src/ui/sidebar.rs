@@ -7,14 +7,14 @@ use gtk4::{
     gio, Box, Button, CheckButton, Orientation, PolicyType, ScrolledWindow, SearchEntry, StringList, Widget,
 };
 use libadwaita::prelude::*;
-use libadwaita::{
-    ActionRow, ComboRow, EntryRow, HeaderBar, PreferencesGroup, SpinRow, ToolbarView,
-};
+use libadwaita::{ActionRow, ComboRow, EntryRow, PreferencesGroup, SpinRow};
 
 use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy, SortBy};
 use crate::metadata::parse_tag_input;
 use crate::ui::filter::{collect_folders, collect_tags, folder_label};
-use crate::ui::gallery::{assign_tags, set_random_wallpaper, GalleryModel, GalleryView};
+use crate::ui::gallery::{
+    assign_tags, remove_tags, set_favorite, set_random_wallpaper, GalleryModel, GalleryView,
+};
 use crate::ui::masonry::MasonryGrid;
 
 const ALL_MONITORS: &str = "All monitors";
@@ -26,6 +26,8 @@ const ALL_FOLDERS: &str = "All folders";
 /// assigns tags to the wallpapers selected in the gallery.
 pub struct Sidebar {
     pub widget: Widget,
+    /// Vertical stack inside the scrolled sidebar; section spacing follows GUI scale.
+    pub content: Box,
     /// Opens the wallpaper folder chooser; the app wires the action.
     pub pick_folder: Button,
 }
@@ -69,27 +71,7 @@ impl Sidebar {
         output_group.add(&monitor_row);
         output_group.add(&backend_row);
 
-        let names_check = CheckButton::new();
-        names_check.set_valign(gtk4::Align::Center);
-        names_check.set_active(config.borrow().show_filenames);
-        let names_row = ActionRow::builder()
-            .title("Show file names")
-            .tooltip_text("Show the file name under each wallpaper")
-            .activatable_widget(&names_check)
-            .build();
-        names_row.add_suffix(&names_check);
-        let gallery_group = PreferencesGroup::builder().title("Gallery").build();
-        gallery_group.add(&names_row);
-        grid.set_show_names(config.borrow().show_filenames);
-        {
-            let config = config.clone();
-            let grid = grid.clone();
-            names_check.connect_toggled(move |check| {
-                let show = check.is_active();
-                grid.set_show_names(show);
-                update(&config, |cfg| cfg.show_filenames = show);
-            });
-        }
+        let gallery_group = build_gallery_section(config.clone(), gallery.clone(), model.clone(), &grid);
 
         let transition_row = ComboRow::builder()
             .title("Transition")
@@ -231,41 +213,38 @@ impl Sidebar {
             });
         }
 
-        let search_group = build_search_section(config.clone(), gallery.clone(), model.clone(), search);
+        let pick_folder = Button::builder()
+            .label("Choose folder…")
+            .tooltip_text("Choose the wallpaper root directory")
+            .halign(gtk4::Align::End)
+            .css_classes(["flat"])
+            .build();
+        let search_group = build_search_section(
+            config.clone(),
+            gallery.clone(),
+            model.clone(),
+            search,
+            pick_folder.clone(),
+        );
 
-        let content = Box::new(Orientation::Vertical, 10);
+        let content = Box::new(Orientation::Vertical, 16);
         content.add_css_class("walltag-sidebar");
-        content.set_margin_top(6);
-        content.set_margin_bottom(8);
-        content.set_margin_start(8);
-        content.set_margin_end(8);
         content.append(&search_group);
         content.append(&output_group);
         content.append(&gallery_group);
         content.append(&awww_group);
+        content.append(&build_edit_section(gallery.clone(), grid, model));
 
         let scroll = ScrolledWindow::builder()
             .hscrollbar_policy(PolicyType::Never)
             .vexpand(true)
             .child(&content)
             .build();
-
-        // Slim header: no title. It keeps the window controls and the folder action.
-        let pick_folder = Button::builder()
-            .icon_name("folder-open-symbolic")
-            .tooltip_text("Choose wallpaper folder")
-            .build();
-        let header = HeaderBar::new();
-        header.set_title_widget(Some(&Box::new(Orientation::Horizontal, 0)));
-        header.set_show_end_title_buttons(false);
-        header.pack_end(&pick_folder);
-        let toolbar = ToolbarView::new();
-        toolbar.add_top_bar(&header);
-        toolbar.set_content(Some(&scroll));
-        toolbar.add_bottom_bar(&build_edit_section(gallery.clone(), grid, model));
+        scroll.add_css_class("walltag-sidebar-shell");
 
         Self {
-            widget: toolbar.upcast(),
+            widget: scroll.upcast(),
+            content,
             pick_folder,
         }
     }
@@ -274,16 +253,25 @@ impl Sidebar {
 const EMPTY_SELECTION_HINT: &str =
     "No wallpapers selected. Right-click a wallpaper, or drag a box around several, to select them.";
 
-/// Browse session: filename search, group-by, sort, tag/folder filters, and random pick.
+/// Browse session: wallpaper root, filename search, folder filter, and random pick.
 fn build_search_section(
     config: Rc<RefCell<AppConfig>>,
     gallery: Rc<GalleryView>,
     model: GalleryModel,
     search: SearchEntry,
+    pick_folder: Button,
 ) -> PreferencesGroup {
     let group = PreferencesGroup::builder()
         .title("Browse")
         .build();
+
+    let folder_pick_row = ActionRow::builder()
+        .title("Wallpaper folder")
+        .tooltip_text("Root directory scanned for images")
+        .activatable(false)
+        .build();
+    folder_pick_row.add_suffix(&pick_folder);
+    group.add(&folder_pick_row);
 
     let search_row = ActionRow::builder()
         .title("Filename")
@@ -292,40 +280,6 @@ fn build_search_section(
     search.set_hexpand(true);
     search_row.add_suffix(&search);
     group.add(&search_row);
-
-    let group_row = ComboRow::builder()
-        .title("Group by")
-        .tooltip_text("Section headers in the gallery")
-        .model(&StringList::new(
-            &GroupBy::ALL.map(GroupBy::label),
-        ))
-        .build();
-    group_row.set_selected(
-        GroupBy::ALL
-            .iter()
-            .position(|g| *g == config.borrow().group_by)
-            .unwrap_or(0) as u32,
-    );
-    group.add(&group_row);
-
-    let sort_row = ComboRow::builder()
-        .title("Sort by")
-        .tooltip_text("Orders groups and wallpapers inside each group")
-        .model(&StringList::new(&SortBy::ALL.map(SortBy::label)))
-        .build();
-    sort_row.set_selected(
-        SortBy::ALL
-            .iter()
-            .position(|s| *s == config.borrow().sort_by)
-            .unwrap_or(0) as u32,
-    );
-    group.add(&sort_row);
-
-    let tag_row = ComboRow::builder()
-        .title("Tag")
-        .tooltip_text("Show only wallpapers with this tag")
-        .build();
-    group.add(&tag_row);
 
     let folder_row = ComboRow::builder()
         .title("Folder")
@@ -347,41 +301,18 @@ fn build_search_section(
     random_row.add_suffix(&random);
     group.add(&random_row);
 
-    // Tag filter options: index 0 = all; then each tag string.
-    let tag_options: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
-    // Folder filter options: index 0 = all; then parent_relative keys.
     let folder_options: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
     let rebuilding = Rc::new(Cell::new(false));
 
     let rebuild_filters: Rc<dyn Fn()> = {
-        let tag_row = tag_row.clone();
         let folder_row = folder_row.clone();
-        let tag_options = tag_options.clone();
         let folder_options = folder_options.clone();
         let model = model.clone();
         let rebuilding = rebuilding.clone();
         Rc::new(move || {
             rebuilding.set(true);
             let entries = model.entries().borrow().clone();
-            let metadata = model.metadata();
-            let metadata = metadata.borrow();
             let filter = model.filter().borrow().clone();
-
-            let tags = collect_tags(&entries, &metadata);
-            let mut tag_labels = vec![ALL_TAGS.to_owned()];
-            tag_labels.extend(tags.iter().cloned());
-            let mut tag_opts = vec![None];
-            tag_opts.extend(tags.into_iter().map(Some));
-            let tag_sel = filter
-                .tag
-                .as_ref()
-                .and_then(|t| tag_opts.iter().position(|o| o.as_ref() == Some(t)))
-                .unwrap_or(0);
-            tag_row.set_model(Some(&StringList::new(
-                &tag_labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            )));
-            tag_row.set_selected(tag_sel as u32);
-            *tag_options.borrow_mut() = tag_opts;
 
             let folders = collect_folders(&entries);
             let mut folder_labels = vec![ALL_FOLDERS.to_owned()];
@@ -407,52 +338,6 @@ fn build_search_section(
         move || rebuild_filters()
     });
 
-    {
-        let config = config.clone();
-        let gallery = gallery.clone();
-        let model = model.clone();
-        group_row.connect_selected_notify(move |row| {
-            let Some(kind) = GroupBy::ALL.get(row.selected() as usize).copied() else {
-                return;
-            };
-            model.filter().borrow_mut().group_by = kind;
-            update(&config, |cfg| cfg.group_by = kind);
-            gallery.refresh(true);
-        });
-    }
-    {
-        let config = config.clone();
-        let gallery = gallery.clone();
-        let model = model.clone();
-        sort_row.connect_selected_notify(move |row| {
-            let Some(kind) = SortBy::ALL.get(row.selected() as usize).copied() else {
-                return;
-            };
-            model.filter().borrow_mut().sort_by = kind;
-            update(&config, |cfg| cfg.sort_by = kind);
-            gallery.refresh(true);
-        });
-    }
-    {
-        let gallery = gallery.clone();
-        let model = model.clone();
-        let tag_options = tag_options.clone();
-        let rebuilding = rebuilding.clone();
-        let config = config.clone();
-        tag_row.connect_selected_notify(move |row| {
-            if rebuilding.get() {
-                return;
-            }
-            let choice = tag_options
-                .borrow()
-                .get(row.selected() as usize)
-                .cloned()
-                .flatten();
-            model.filter().borrow_mut().tag = choice.clone();
-            update(&config, |cfg| cfg.filter_tag = choice);
-            gallery.refresh(true);
-        });
-    }
     {
         let gallery = gallery.clone();
         let model = model.clone();
@@ -485,8 +370,165 @@ fn build_search_section(
     group
 }
 
-/// Edit section pinned to the bottom of the sidebar. It shows how many wallpapers are in
-/// the gallery's edit batch and adds the typed tags to each of them.
+/// Gallery section: group-by, sort, tag filter, and display options.
+fn build_gallery_section(
+    config: Rc<RefCell<AppConfig>>,
+    gallery: Rc<GalleryView>,
+    model: GalleryModel,
+    grid: &MasonryGrid,
+) -> PreferencesGroup {
+    let group = PreferencesGroup::builder().title("Gallery").build();
+
+    let group_row = ComboRow::builder()
+        .title("Group by")
+        .tooltip_text("Section headers in the gallery")
+        .model(&StringList::new(&GroupBy::ALL.map(GroupBy::label)))
+        .build();
+    group_row.set_selected(
+        GroupBy::ALL
+            .iter()
+            .position(|g| *g == config.borrow().group_by)
+            .unwrap_or(0) as u32,
+    );
+    group.add(&group_row);
+
+    let sort_row = ComboRow::builder()
+        .title("Sort by")
+        .tooltip_text("Orders groups and wallpapers inside each group")
+        .model(&StringList::new(&SortBy::ALL.map(SortBy::label)))
+        .build();
+    sort_row.set_selected(
+        SortBy::ALL
+            .iter()
+            .position(|s| *s == config.borrow().sort_by)
+            .unwrap_or(0) as u32,
+    );
+    group.add(&sort_row);
+
+    let tag_row = ComboRow::builder()
+        .title("Tag")
+        .tooltip_text("Show only wallpapers with this tag")
+        .build();
+    group.add(&tag_row);
+
+    let names_check = CheckButton::new();
+    names_check.set_valign(gtk4::Align::Center);
+    names_check.set_active(config.borrow().show_filenames);
+    let names_row = ActionRow::builder()
+        .title("Show file names")
+        .tooltip_text("Show the file name under each wallpaper")
+        .activatable_widget(&names_check)
+        .build();
+    names_row.add_suffix(&names_check);
+    group.add(&names_row);
+    grid.set_show_names(config.borrow().show_filenames);
+    {
+        let config = config.clone();
+        let grid = grid.clone();
+        names_check.connect_toggled(move |check| {
+            let show = check.is_active();
+            grid.set_show_names(show);
+            update(&config, |cfg| cfg.show_filenames = show);
+        });
+    }
+
+    let tag_options: Rc<RefCell<Vec<Option<String>>>> = Rc::new(RefCell::new(vec![None]));
+    let rebuilding = Rc::new(Cell::new(false));
+    let rebuild_tags: Rc<dyn Fn()> = {
+        let tag_row = tag_row.clone();
+        let tag_options = tag_options.clone();
+        let model = model.clone();
+        let rebuilding = rebuilding.clone();
+        Rc::new(move || {
+            rebuilding.set(true);
+            let entries = model.entries().borrow().clone();
+            let metadata = model.metadata();
+            let metadata = metadata.borrow();
+            let filter = model.filter().borrow().clone();
+            let tags = collect_tags(&entries, &metadata);
+            let mut labels = vec![ALL_TAGS.to_owned()];
+            labels.extend(tags.iter().cloned());
+            let mut opts = vec![None];
+            opts.extend(tags.into_iter().map(Some));
+            let sel = filter
+                .tag
+                .as_ref()
+                .and_then(|t| opts.iter().position(|o| o.as_ref() == Some(t)))
+                .unwrap_or(0);
+            tag_row.set_model(Some(&StringList::new(
+                &labels.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
+            )));
+            tag_row.set_selected(sel as u32);
+            *tag_options.borrow_mut() = opts;
+            rebuilding.set(false);
+        })
+    };
+    rebuild_tags();
+    gallery.connect_repopulated({
+        let rebuild_tags = rebuild_tags.clone();
+        move || rebuild_tags()
+    });
+
+    {
+        let config = config.clone();
+        let gallery = gallery.clone();
+        let model = model.clone();
+        group_row.connect_selected_notify(move |row| {
+            let Some(kind) = GroupBy::ALL.get(row.selected() as usize).copied() else {
+                return;
+            };
+            if model.filter().borrow().group_by == kind {
+                return;
+            }
+            model.filter().borrow_mut().group_by = kind;
+            update(&config, |cfg| cfg.group_by = kind);
+            gallery.refresh(true);
+        });
+    }
+    {
+        let config = config.clone();
+        let gallery = gallery.clone();
+        let model = model.clone();
+        sort_row.connect_selected_notify(move |row| {
+            let Some(kind) = SortBy::ALL.get(row.selected() as usize).copied() else {
+                return;
+            };
+            if model.filter().borrow().sort_by == kind {
+                return;
+            }
+            model.filter().borrow_mut().sort_by = kind;
+            update(&config, |cfg| cfg.sort_by = kind);
+            gallery.refresh(true);
+        });
+    }
+    {
+        let gallery = gallery.clone();
+        let model = model.clone();
+        let tag_options = tag_options.clone();
+        let rebuilding = rebuilding.clone();
+        let config = config.clone();
+        tag_row.connect_selected_notify(move |row| {
+            if rebuilding.get() {
+                return;
+            }
+            let choice = tag_options
+                .borrow()
+                .get(row.selected() as usize)
+                .cloned()
+                .flatten();
+            if model.filter().borrow().tag == choice {
+                return;
+            }
+            model.filter().borrow_mut().tag = choice.clone();
+            update(&config, |cfg| cfg.filter_tag = choice);
+            gallery.refresh(true);
+        });
+    }
+
+    group
+}
+
+/// Edit section in the sidebar scroll content (same chrome as Browse / Gallery).
 fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: GalleryModel) -> Box {
     let clear = Button::builder()
         .label("Clear")
@@ -498,17 +540,45 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         .title("Add tags (comma or space separated)")
         .show_apply_button(true)
         .build();
+    let favorite_check = CheckButton::new();
+    favorite_check.set_valign(gtk4::Align::Center);
+    let favorite_row = ActionRow::builder()
+        .title("Favorite")
+        .subtitle("Appears in the Favorites group")
+        .activatable_widget(&favorite_check)
+        .build();
+    favorite_row.add_suffix(&favorite_check);
+
     let group = PreferencesGroup::builder().title("Edit").build();
     group.set_header_suffix(Some(&clear));
+    group.add(&favorite_row);
     group.add(&tags_row);
+
+    let shared_group = PreferencesGroup::builder()
+        .title("Shared tags")
+        .description("Tags on every selected wallpaper. Remove deletes them from the selection.")
+        .build();
+    let shared_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
+    let syncing = Rc::new(Cell::new(false));
+    // Filled after `refresh` is built so remove / favorite handlers can call it.
+    let refresh_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     let refresh: Rc<dyn Fn()> = {
         let grid = grid.clone();
         let group = group.clone();
+        let shared_group = shared_group.clone();
         let tags_row = tags_row.clone();
         let clear = clear.clone();
+        let favorite_check = favorite_check.clone();
+        let favorite_row = favorite_row.clone();
+        let model = model.clone();
+        let gallery = gallery.clone();
+        let shared_rows = shared_rows.clone();
+        let syncing = syncing.clone();
+        let refresh_slot = refresh_slot.clone();
         Rc::new(move || {
-            let count = grid.selected_keys().len();
+            let keys = grid.selected_keys();
+            let count = keys.len();
             let description = match count {
                 0 => EMPTY_SELECTION_HINT.to_owned(),
                 1 => "1 wallpaper selected".to_owned(),
@@ -517,8 +587,95 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
             group.set_description(Some(&description));
             tags_row.set_sensitive(count > 0);
             clear.set_sensitive(count > 0);
+            favorite_row.set_sensitive(count > 0);
+
+            syncing.set(true);
+            match model.metadata().borrow().shared_favorite(&keys) {
+                Some(value) => {
+                    favorite_check.set_inconsistent(false);
+                    favorite_check.set_active(value);
+                }
+                None if count > 0 => {
+                    favorite_check.set_inconsistent(true);
+                    favorite_check.set_active(false);
+                }
+                None => {
+                    favorite_check.set_inconsistent(false);
+                    favorite_check.set_active(false);
+                }
+            }
+            syncing.set(false);
+
+            for row in shared_rows.borrow_mut().drain(..) {
+                shared_group.remove(&row);
+            }
+            let shared = if count > 0 {
+                model.metadata().borrow().shared_tags(&keys)
+            } else {
+                Vec::new()
+            };
+            shared_group.set_visible(count > 0);
+            if shared.is_empty() {
+                shared_group.set_description(Some(if count == 0 {
+                    "Select wallpapers to manage shared tags."
+                } else {
+                    "No tags in common across the selection."
+                }));
+            } else {
+                shared_group.set_description(Some(
+                    "Tags on every selected wallpaper. Remove deletes them from the selection.",
+                ));
+                for tag in shared {
+                    let row = ActionRow::builder()
+                        .title(tag.clone())
+                        .activatable(false)
+                        .build();
+                    let remove = Button::builder()
+                        .icon_name("list-remove-symbolic")
+                        .tooltip_text(format!("Remove “{tag}” from selection"))
+                        .valign(gtk4::Align::Center)
+                        .css_classes(["flat"])
+                        .build();
+                    {
+                        let grid = grid.clone();
+                        let model = model.clone();
+                        let gallery = gallery.clone();
+                        let group = group.clone();
+                        let refresh_slot = refresh_slot.clone();
+                        let tag = tag.clone();
+                        remove.connect_clicked(move |_| {
+                            let keys = grid.selected_keys();
+                            if keys.is_empty() {
+                                return;
+                            }
+                            match remove_tags(&grid, &model, &keys, &[tag.clone()]) {
+                                Ok(()) => {
+                                    group.set_description(Some(&format!(
+                                        "Removed “{tag}” from {} selected",
+                                        keys.len()
+                                    )));
+                                    gallery.refresh(false);
+                                    if let Some(refresh) = refresh_slot.borrow().as_ref() {
+                                        refresh();
+                                    }
+                                }
+                                Err(err) => {
+                                    tracing::error!("Failed to remove tag: {err:#}");
+                                    group.set_description(Some(
+                                        "Could not save tags. See the log for details.",
+                                    ));
+                                }
+                            }
+                        });
+                    }
+                    row.add_suffix(&remove);
+                    shared_group.add(&row);
+                    shared_rows.borrow_mut().push(row);
+                }
+            }
         })
     };
+    *refresh_slot.borrow_mut() = Some(refresh.clone());
     refresh();
     {
         let refresh = refresh.clone();
@@ -529,8 +686,51 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         clear.connect_clicked(move |_| grid.clear_selection());
     }
     {
+        let grid = grid.clone();
+        let model = model.clone();
+        let gallery = gallery.clone();
+        let group = group.clone();
+        let syncing = syncing.clone();
+        let refresh = refresh.clone();
+        favorite_check.connect_toggled(move |check| {
+            if syncing.get() {
+                return;
+            }
+            let keys = grid.selected_keys();
+            if keys.is_empty() {
+                return;
+            }
+            check.set_inconsistent(false);
+            let favorite = check.is_active();
+            match set_favorite(&grid, &model, &keys, favorite) {
+                Ok(()) => {
+                    group.set_description(Some(&format!(
+                        "{} {} selected",
+                        if favorite {
+                            "Favorited"
+                        } else {
+                            "Unfavorited"
+                        },
+                        keys.len()
+                    )));
+                    gallery.refresh(false);
+                    refresh();
+                }
+                Err(err) => {
+                    tracing::error!("Failed to save favorite: {err:#}");
+                    group.set_description(Some(
+                        "Could not save favorite. See the log for details.",
+                    ));
+                }
+            }
+        });
+    }
+    {
         let group = group.clone();
         let gallery = gallery.clone();
+        let model = model.clone();
+        let grid = grid.clone();
+        let refresh = refresh.clone();
         tags_row.connect_apply(move |row| {
             let tags = parse_tag_input(&row.text());
             let keys = grid.selected_keys();
@@ -547,6 +747,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
                     )));
                     // Rebuild so tag groups and the tag filter list stay current.
                     gallery.refresh(false);
+                    refresh();
                 }
                 Err(err) => {
                     tracing::error!("Failed to save tags: {err:#}");
@@ -556,13 +757,9 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         });
     }
 
-    let section = Box::new(Orientation::Vertical, 0);
-    section.add_css_class("walltag-sidebar");
-    section.set_margin_top(4);
-    section.set_margin_bottom(8);
-    section.set_margin_start(8);
-    section.set_margin_end(8);
+    let section = Box::new(Orientation::Vertical, 12);
     section.append(&group);
+    section.append(&shared_group);
     section
 }
 
