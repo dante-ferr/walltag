@@ -1,12 +1,11 @@
-# Flatpak manifest for Walltag (local builds from this repository).
+# Flatpak / Flathub manifest for Walltag.
 # Regenerate cargo-sources.json after Cargo.lock changes:
 #   ./packaging/flatpak/generate-cargo-sources.sh
 #
-# For Flathub, replace the dir source with a git tag + commit (see README.md).
 # Host access for swww/awww/post_command: see packaging/flatpak/README.md.
 app-id: io.github.dante_ferr.Walltag
 runtime: org.gnome.Platform
-runtime-version: '48'
+runtime-version: '51'
 sdk: org.gnome.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
@@ -35,6 +34,8 @@ modules:
       - install -Dm644 assets/io.github.dante_ferr.Walltag.metainfo.xml /app/share/metainfo/io.github.dante_ferr.Walltag.metainfo.xml
       - install -Dm644 assets/io.github.dante_ferr.Walltag.svg /app/share/icons/hicolor/scalable/apps/io.github.dante_ferr.Walltag.svg
     sources:
-      - type: dir
-        path: ../..
+      - type: git
+        url: https://github.com/dante-ferr/walltag.git
+        tag: v0.1.0
+        commit: 9512b06d78a6277dfd0ba59af292d77f6ab90b68
       - cargo-sources.json
