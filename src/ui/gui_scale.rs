@@ -169,6 +169,26 @@ fn chrome_scale_css(scale: f32) -> String {
             padding-start: {p12};
             padding-end: {p12};
         }}
+        .walltag-sidebar preferencesgroup.walltag-shared-tags > box {{
+            border-spacing: {sp2};
+        }}
+        .walltag-sidebar preferencesgroup.walltag-shared-tags row {{
+            min-height: 0;
+        }}
+        .walltag-sidebar preferencesgroup.walltag-shared-tags row > box.header {{
+            min-height: {tag_row_h};
+            padding-top: {m0};
+            padding-bottom: {m0};
+        }}
+        .walltag-sidebar preferencesgroup.walltag-shared-tags row > box.header > box.title {{
+            margin-top: {m0};
+            margin-bottom: {m0};
+        }}
+        .walltag-sidebar preferencesgroup.walltag-shared-tags row > box.header > box.suffixes button {{
+            min-height: {m0};
+            min-width: {m0};
+            padding: {m1};
+        }}
         .walltag-sidebar row > box.header > box.suffixes entry,
         .walltag-sidebar entry,
         .walltag-sidebar spinbutton {{
@@ -222,8 +242,10 @@ fn chrome_scale_css(scale: f32) -> String {
         m8 = px(8.0, s),
         m10 = px(10.0, s),
         m12 = px(12.0, s),
+        sp2 = px(2.0, s),
         sp6 = px(6.0, s),
         sp8 = px(8.0, s),
+        tag_row_h = px(24.0, s),
         heading = px(10.08, s),
         subtitle = px(11.9, s),
         r12 = px(12.0, s),

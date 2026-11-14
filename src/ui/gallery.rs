@@ -731,6 +731,26 @@ pub fn default_app_css() -> &'static str {
       padding-top: 0.214em;
       padding-bottom: 0.214em;
     }
+    .walltag-sidebar preferencesgroup.walltag-shared-tags > box {
+      border-spacing: 0.071em;
+    }
+    .walltag-sidebar preferencesgroup.walltag-shared-tags row {
+      min-height: 0;
+    }
+    .walltag-sidebar preferencesgroup.walltag-shared-tags row > box.header {
+      min-height: 1.714em;
+      padding-top: 0;
+      padding-bottom: 0;
+    }
+    .walltag-sidebar preferencesgroup.walltag-shared-tags row > box.header > box.title {
+      margin-top: 0;
+      margin-bottom: 0;
+    }
+    .walltag-sidebar preferencesgroup.walltag-shared-tags row > box.header > box.suffixes button {
+      min-height: 0;
+      min-width: 0;
+      padding: 0.143em;
+    }
     /* Dropdown rows: the selected value and arrow never get a hover chip. */
     row.combo > box.header > box.suffixes listview,
     row.combo > box.header > box.suffixes listview > row,
