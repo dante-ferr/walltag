@@ -140,6 +140,58 @@ pub struct AppConfig {
     /// How the gallery groups wallpapers (none, folder, or tag).
     #[serde(default)]
     pub group_by: GroupBy,
+    /// How the gallery orders groups and the wallpapers inside them.
+    #[serde(default)]
+    pub sort_by: SortBy,
+}
+
+/// Ordering for groups (section headers) and for the wallpapers inside each group.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SortBy {
+    /// File name, A to Z.
+    #[default]
+    NameAsc,
+    /// File name, Z to A.
+    NameDesc,
+    /// Path relative to the wallpaper root.
+    Path,
+    /// Filesystem modification time, newest first.
+    DateNewest,
+    /// Filesystem modification time, oldest first.
+    DateOldest,
+    /// File size, largest first.
+    SizeLargest,
+    /// File size, smallest first.
+    SizeSmallest,
+    /// Average color hue around the color wheel. Low-saturation images come last.
+    Hue,
+}
+
+impl SortBy {
+    pub const ALL: [Self; 8] = [
+        Self::NameAsc,
+        Self::NameDesc,
+        Self::Path,
+        Self::DateNewest,
+        Self::DateOldest,
+        Self::SizeLargest,
+        Self::SizeSmallest,
+        Self::Hue,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NameAsc => "Name (A–Z)",
+            Self::NameDesc => "Name (Z–A)",
+            Self::Path => "Path",
+            Self::DateNewest => "Date modified (newest)",
+            Self::DateOldest => "Date modified (oldest)",
+            Self::SizeLargest => "Size (largest)",
+            Self::SizeSmallest => "Size (smallest)",
+            Self::Hue => "Color (hue)",
+        }
+    }
 }
 
 /// How the gallery groups wallpapers under section headers.
@@ -197,6 +249,7 @@ impl Default for AppConfig {
             sidebar_width: default_sidebar_width(),
             show_filenames: false,
             group_by: GroupBy::default(),
+            sort_by: SortBy::default(),
         }
     }
 }
@@ -295,6 +348,21 @@ mod tests {
         assert_eq!(cfg.awww, AwwwOptions::default());
         assert_eq!(cfg.sidebar_width, 300);
         assert!(!cfg.show_filenames);
+        assert_eq!(cfg.sort_by, SortBy::NameAsc);
+    }
+
+    #[test]
+    fn sort_by_round_trips_as_snake_case() {
+        let mut cfg = AppConfig::default();
+        cfg.sort_by = SortBy::DateNewest;
+        let raw = serde_json::to_string(&cfg).unwrap();
+        assert!(raw.contains(r#""sort_by":"date_newest""#));
+        let back: AppConfig = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.sort_by, SortBy::DateNewest);
+        for sort in SortBy::ALL {
+            let json = serde_json::to_string(&sort).unwrap();
+            assert_eq!(serde_json::from_str::<SortBy>(&json).unwrap(), sort);
+        }
     }
 
     #[test]

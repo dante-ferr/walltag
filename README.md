@@ -43,7 +43,7 @@ Set log verbosity with `RUST_LOG`, for example `RUST_LOG=walltag=debug`.
 
 ## Gallery search
 
-The sidebar **Search** section includes:
+The sidebar **Browse** section includes:
 
 - Filename search
 - **Group by** None, Folder (workspace), or Tag (section headers in the grid)

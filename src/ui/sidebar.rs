@@ -11,7 +11,7 @@ use libadwaita::{
     ActionRow, ComboRow, EntryRow, HeaderBar, PreferencesGroup, SpinRow, ToolbarView,
 };
 
-use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy};
+use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy, SortBy};
 use crate::metadata::parse_tag_input;
 use crate::ui::filter::{collect_folders, collect_tags, folder_label};
 use crate::ui::gallery::{assign_tags, set_random_wallpaper, GalleryModel, GalleryView};
@@ -40,7 +40,7 @@ impl Sidebar {
         let search = gallery.search.clone();
         let monitor_row = ComboRow::builder()
             .title("Monitor")
-            .subtitle("Output that receives the wallpaper")
+            .tooltip_text("Output that receives the wallpaper")
             .build();
         let refresh = Button::builder()
             .icon_name("view-refresh-symbolic")
@@ -48,11 +48,10 @@ impl Sidebar {
             .valign(gtk4::Align::Center)
             .css_classes(["flat"])
             .build();
-        monitor_row.add_suffix(&refresh);
 
         let backend_row = ComboRow::builder()
             .title("Backend")
-            .subtitle("Wallpaper daemon to use")
+            .tooltip_text("Wallpaper daemon to use")
             .model(&StringList::new(
                 &BackendKind::ALL.map(BackendKind::as_str),
             ))
@@ -65,6 +64,8 @@ impl Sidebar {
         );
 
         let output_group = PreferencesGroup::builder().title("Output").build();
+        // The refresh button sits in the group header so it does not crush the monitor value.
+        output_group.set_header_suffix(Some(&refresh));
         output_group.add(&monitor_row);
         output_group.add(&backend_row);
 
@@ -73,7 +74,7 @@ impl Sidebar {
         names_check.set_active(config.borrow().show_filenames);
         let names_row = ActionRow::builder()
             .title("Show file names")
-            .subtitle("Under each wallpaper")
+            .tooltip_text("Show the file name under each wallpaper")
             .activatable_widget(&names_check)
             .build();
         names_row.add_suffix(&names_check);
@@ -98,13 +99,13 @@ impl Sidebar {
             .build();
         let duration_row = SpinRow::with_range(0.0, 10.0, 0.1);
         duration_row.set_title("Duration");
-        duration_row.set_subtitle("Seconds. Ignored by the simple and none transitions");
+        duration_row.set_tooltip_text(Some("Seconds. Ignored by the simple and none transitions"));
         duration_row.set_digits(1);
         let fps_row = SpinRow::with_range(1.0, 240.0, 1.0);
         fps_row.set_title("Frame rate");
         let angle_row = SpinRow::with_range(0.0, 360.0, 5.0);
         angle_row.set_title("Angle");
-        angle_row.set_subtitle("Degrees, for wipe and wave");
+        angle_row.set_tooltip_text(Some("Degrees, for wipe and wave"));
 
         {
             let cfg = config.borrow();
@@ -232,11 +233,12 @@ impl Sidebar {
 
         let search_group = build_search_section(config.clone(), gallery.clone(), model.clone(), search);
 
-        let content = Box::new(Orientation::Vertical, 18);
-        content.set_margin_top(12);
-        content.set_margin_bottom(12);
-        content.set_margin_start(12);
-        content.set_margin_end(12);
+        let content = Box::new(Orientation::Vertical, 10);
+        content.add_css_class("walltag-sidebar");
+        content.set_margin_top(6);
+        content.set_margin_bottom(8);
+        content.set_margin_start(8);
+        content.set_margin_end(8);
         content.append(&search_group);
         content.append(&output_group);
         content.append(&gallery_group);
@@ -272,7 +274,7 @@ impl Sidebar {
 const EMPTY_SELECTION_HINT: &str =
     "No wallpapers selected. Right-click a wallpaper, or drag a box around several, to select them.";
 
-/// Search session: filename search, group-by, tag/folder filters, and random pick.
+/// Browse session: filename search, group-by, sort, tag/folder filters, and random pick.
 fn build_search_section(
     config: Rc<RefCell<AppConfig>>,
     gallery: Rc<GalleryView>,
@@ -280,8 +282,7 @@ fn build_search_section(
     search: SearchEntry,
 ) -> PreferencesGroup {
     let group = PreferencesGroup::builder()
-        .title("Search")
-        .description("Filter and group the gallery")
+        .title("Browse")
         .build();
 
     let search_row = ActionRow::builder()
@@ -294,7 +295,7 @@ fn build_search_section(
 
     let group_row = ComboRow::builder()
         .title("Group by")
-        .subtitle("Section headers in the gallery")
+        .tooltip_text("Section headers in the gallery")
         .model(&StringList::new(
             &GroupBy::ALL.map(GroupBy::label),
         ))
@@ -307,15 +308,28 @@ fn build_search_section(
     );
     group.add(&group_row);
 
+    let sort_row = ComboRow::builder()
+        .title("Sort by")
+        .tooltip_text("Orders groups and wallpapers inside each group")
+        .model(&StringList::new(&SortBy::ALL.map(SortBy::label)))
+        .build();
+    sort_row.set_selected(
+        SortBy::ALL
+            .iter()
+            .position(|s| *s == config.borrow().sort_by)
+            .unwrap_or(0) as u32,
+    );
+    group.add(&sort_row);
+
     let tag_row = ComboRow::builder()
         .title("Tag")
-        .subtitle("Show only wallpapers with this tag")
+        .tooltip_text("Show only wallpapers with this tag")
         .build();
     group.add(&tag_row);
 
     let folder_row = ComboRow::builder()
         .title("Folder")
-        .subtitle("Show only wallpapers in this workspace folder")
+        .tooltip_text("Show only wallpapers in this workspace folder")
         .build();
     group.add(&folder_row);
 
@@ -327,7 +341,7 @@ fn build_search_section(
         .build();
     let random_row = ActionRow::builder()
         .title("Random wallpaper")
-        .subtitle("Uses the current filters")
+        .tooltip_text("Uses the current filters")
         .activatable(false)
         .build();
     random_row.add_suffix(&random);
@@ -403,6 +417,19 @@ fn build_search_section(
             };
             model.filter().borrow_mut().group_by = kind;
             update(&config, |cfg| cfg.group_by = kind);
+            gallery.refresh(true);
+        });
+    }
+    {
+        let config = config.clone();
+        let gallery = gallery.clone();
+        let model = model.clone();
+        sort_row.connect_selected_notify(move |row| {
+            let Some(kind) = SortBy::ALL.get(row.selected() as usize).copied() else {
+                return;
+            };
+            model.filter().borrow_mut().sort_by = kind;
+            update(&config, |cfg| cfg.sort_by = kind);
             gallery.refresh(true);
         });
     }
@@ -526,10 +553,11 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
     }
 
     let section = Box::new(Orientation::Vertical, 0);
-    section.set_margin_top(12);
-    section.set_margin_bottom(12);
-    section.set_margin_start(12);
-    section.set_margin_end(12);
+    section.add_css_class("walltag-sidebar");
+    section.set_margin_top(4);
+    section.set_margin_bottom(8);
+    section.set_margin_start(8);
+    section.set_margin_end(8);
     section.append(&group);
     section
 }

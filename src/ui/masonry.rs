@@ -2,6 +2,12 @@
 //!
 //! Layout is pure integer math (`compute_layout`). The widget only keeps `Picture`
 //! children for tiles near the viewport and recycles them while scrolling.
+//!
+//! Layout changes (items, zoom, file names, column count) animate for `ANIM_DURATION_MS`
+//! with ease-out cubic. Tiles are keyed by item key. Kept tiles interpolate their rectangle,
+//! new tiles fade in with widget opacity, and removed tiles fade out and are then recycled.
+//! Hit testing, tooltips, and drag selection always use the final layout; only drawing
+//! (tiles and selection tint) uses the interpolated rectangles.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -35,7 +41,7 @@ pub const FALLBACK_ASPECT: f32 = 16.0 / 9.0;
 /// Logical height of a group section header row.
 pub const SECTION_HEADER_HEIGHT: i32 = 32;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GridItem {
     pub key: String,
     pub path: PathBuf,
@@ -100,6 +106,8 @@ pub struct Layout {
     pub is_header: Vec<bool>,
     /// Height of the file name strip directly under each image; 0 when names are hidden.
     pub label_height: i32,
+    /// Number of masonry columns.
+    pub columns: usize,
 }
 
 impl Layout {
@@ -297,7 +305,92 @@ pub fn compute_layout_with_headers(
         rects,
         is_header: is_header.to_vec(),
         label_height,
+        columns,
     }
+}
+
+/// Duration of layout transitions (moves, fades) in milliseconds.
+const ANIM_DURATION_MS: f64 = 280.0;
+
+/// Ease-out cubic: fast start, gentle landing. Maps `0..=1` to `0..=1`.
+pub fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
+
+/// Linear animation progress (`0..=1`) after `elapsed_us` microseconds.
+fn progress(elapsed_us: i64) -> f32 {
+    ((elapsed_us.max(0) as f64) / (ANIM_DURATION_MS * 1000.0)).min(1.0) as f32
+}
+
+/// Animated visual state of one tile: image rectangle, label strip height, tile opacity,
+/// and label opacity (relative to the tile).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vis {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub lh: f32,
+    pub a: f32,
+    pub la: f32,
+}
+
+impl Vis {
+    pub fn lerp(self, to: Vis, t: f32) -> Vis {
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Vis {
+            x: mix(self.x, to.x),
+            y: mix(self.y, to.y),
+            w: mix(self.w, to.w),
+            h: mix(self.h, to.h),
+            lh: mix(self.lh, to.lh),
+            a: mix(self.a, to.a),
+            la: mix(self.la, to.la),
+        }
+    }
+}
+
+/// How the scroll offset changes together with the content.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScrollMode {
+    /// Keep the offset (clamped to the new content height).
+    Keep,
+    /// Jump to the top.
+    Top,
+    /// Keep the offset as a fraction of the content height.
+    Relative(f64),
+}
+
+/// New scroll value for content of `height` pixels in a viewport of `page` pixels.
+fn scroll_target(mode: ScrollMode, old_value: f64, _old_upper: f64, page: f64, height: i32) -> f64 {
+    let upper = (height as f64).max(page);
+    let max = (upper - page).max(0.0);
+    let value = match mode {
+        ScrollMode::Keep => old_value,
+        ScrollMode::Top => 0.0,
+        ScrollMode::Relative(r) => r * upper,
+    };
+    value.clamp(0.0, max)
+}
+
+/// Unique tile id per item, parallel to `items`. The first item with a key uses the key;
+/// repeats (a wallpaper listed under several tag groups) get a numeric suffix.
+pub fn item_ids(items: &[GridItem]) -> Vec<String> {
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    items
+        .iter()
+        .map(|item| {
+            let n = seen.entry(item.key.as_str()).or_insert(0);
+            let id = if *n == 0 {
+                item.key.clone()
+            } else {
+                format!("{}\u{1}{}", item.key, n)
+            };
+            *n += 1;
+            id
+        })
+        .collect()
 }
 
 mod imp {
@@ -325,17 +418,71 @@ mod imp {
     /// Vertical padding added to the text height of a file name label.
     const LABEL_PAD: i32 = 6;
 
+    /// Cached layout and ids that the tiles currently target.
+    type Shown = (Rc<Vec<String>>, Rc<Layout>);
+
+    /// One realized tile (or a tile that is fading out after it left the item set).
     struct Tile {
+        /// Item key, used to look up the selection.
+        key: String,
         picture: Option<Picture>,
         label: Option<Label>,
         cancel: Arc<AtomicBool>,
+        /// Pixel width of the last thumbnail request.
+        thumb_px: i32,
+        /// Index in the final layout; `None` while the tile fades out.
+        idx: Option<usize>,
+        /// Animation start, end, and current (drawn) state.
+        from: Vis,
+        to: Vis,
+        cur: Vis,
+    }
+
+    impl Tile {
+        fn is_header(&self) -> bool {
+            self.picture.is_none()
+        }
+
+        fn step(&mut self, eased: f32) {
+            self.cur = self.from.lerp(self.to, eased);
+        }
+
+        /// Pushes the current opacity to the widgets.
+        fn apply(&self) {
+            let c = self.cur;
+            if let Some(picture) = &self.picture {
+                picture.set_opacity(c.a as f64);
+            }
+            if let Some(label) = &self.label {
+                let factor = if self.is_header() { 1.0 } else { c.la };
+                label.set_opacity((c.a * factor) as f64);
+            }
+        }
+    }
+
+    /// Data that tiles realized mid-animation need to join the running transition.
+    struct Transition {
+        /// Visual state of every item in the previous layout, already shifted by the
+        /// scroll change so the screen position is continuous.
+        prev: HashMap<String, Vis>,
     }
 
     #[derive(Default)]
     pub struct MasonryGrid {
         pub items: RefCell<Rc<Vec<GridItem>>>,
+        /// Parallel to `items`: unique tile ids (duplicate keys get a suffix).
+        ids: RefCell<Rc<Vec<String>>>,
+        /// Final layout. Hit testing, tooltips, and drag selection use this layout, not
+        /// the interpolated tile positions, so a click lands where the tile settles.
         pub layout: RefCell<Option<Rc<Layout>>>,
-        tiles: RefCell<HashMap<usize, Tile>>,
+        tiles: RefCell<HashMap<String, Tile>>,
+        leaving: RefCell<Vec<Tile>>,
+        shown: RefCell<Option<Shown>>,
+        placed_width: Cell<i32>,
+        transition: RefCell<Option<Transition>>,
+        anim_start: Cell<Option<i64>>,
+        anim_e: Cell<f32>,
+        ticking: Cell<bool>,
         pool: RefCell<Vec<Picture>>,
         label_pool: RefCell<Vec<Label>>,
         pub show_names: Cell<bool>,
@@ -365,6 +512,7 @@ mod imp {
                 child.unparent();
             }
             self.tiles.borrow_mut().clear();
+            self.leaving.borrow_mut().clear();
             self.pool.borrow_mut().clear();
             self.label_pool.borrow_mut().clear();
         }
@@ -391,29 +539,15 @@ mod imp {
         }
 
         fn size_allocate(&self, width: i32, _height: i32, _baseline: i32) {
-            let layout = self.layout_for(width);
-            for (idx, tile) in self.tiles.borrow().iter() {
-                let Some(r) = layout.rects.get(*idx) else {
-                    continue;
-                };
-                if layout.is_header(*idx) {
-                    if let Some(label) = &tile.label {
-                        label.size_allocate(
-                            &gtk4::Allocation::new(r.x, r.y, r.w, r.h),
-                            -1,
-                        );
-                    }
-                    continue;
-                }
-                if let Some(picture) = &tile.picture {
-                    picture.size_allocate(&gtk4::Allocation::new(r.x, r.y, r.w, r.h), -1);
-                }
-                if let Some(label) = &tile.label {
-                    label.size_allocate(
-                        &gtk4::Allocation::new(r.x, r.y + r.h, r.w, layout.label_height),
-                        -1,
-                    );
-                }
+            self.layout_for(width);
+            if self.placed_width.get() != width {
+                self.on_width_changed(width);
+            }
+            for tile in self.tiles.borrow().values() {
+                place(tile);
+            }
+            for tile in self.leaving.borrow().iter() {
+                place(tile);
             }
             // Realize/recycle after allocation so we never reparent during allocate.
             self.queue_sync();
@@ -425,43 +559,69 @@ mod imp {
         }
     }
 
+    /// Allocates a tile at its current (interpolated) state.
+    fn place(tile: &Tile) {
+        let c = tile.cur;
+        let (x0, x1) = (c.x.round() as i32, (c.x + c.w).round() as i32);
+        let (y0, y1) = (c.y.round() as i32, (c.y + c.h).round() as i32);
+        let (w, h) = ((x1 - x0).max(1), (y1 - y0).max(1));
+        match (&tile.picture, &tile.label) {
+            (None, Some(label)) => {
+                label.size_allocate(&gtk4::Allocation::new(x0, y0, w, h), -1);
+            }
+            (picture, label) => {
+                if let Some(picture) = picture {
+                    picture.size_allocate(&gtk4::Allocation::new(x0, y0, w, h), -1);
+                }
+                if let Some(label) = label {
+                    // Keep the strip at its larger size while it grows or shrinks.
+                    let lh = (tile.from.lh.max(tile.to.lh).round() as i32).max(1);
+                    label.size_allocate(&gtk4::Allocation::new(x0, y1, w, lh), -1);
+                }
+            }
+        }
+    }
+
+    fn overlaps(top: f64, bottom: f64, (a, b): (f64, f64)) -> bool {
+        bottom > a && top < b
+    }
+
     impl MasonryGrid {
         /// Draws selection tint and border over the tiles (inside each tile's bounds, so
-        /// the layout stays gapless), then the drag rectangle.
+        /// the layout stays gapless), then the drag rectangle. Tints follow the animated
+        /// tile positions; the drag preview is computed on the final layout.
         fn snapshot_overlays(&self, snapshot: &gtk4::Snapshot) {
-            let Some(layout) = self.layout.borrow().clone() else {
-                return;
-            };
             let drag = self.drag.get().filter(|d| d.active);
-            let preview: HashSet<usize> = drag
-                .map(|d| {
-                    layout
-                        .hit_rect(d.start.0, d.start.1, d.current.0, d.current.1)
-                        .into_iter()
-                        .collect()
-                })
-                .unwrap_or_default();
+            let preview: HashSet<usize> = match (drag, self.layout.borrow().as_ref()) {
+                (Some(d), Some(layout)) => layout
+                    .hit_rect(d.start.0, d.start.1, d.current.0, d.current.1)
+                    .into_iter()
+                    .collect(),
+                _ => HashSet::new(),
+            };
             let accent = self.accent();
             let with_alpha = |alpha: f32| gdk::RGBA::new(accent.red(), accent.green(), accent.blue(), alpha);
 
             if !self.selected.borrow().is_empty() || !preview.is_empty() {
-                let items = self.items.borrow().clone();
                 let selected = self.selected.borrow();
-                for idx in self.tiles.borrow().keys() {
-                    let (Some(r), Some(item)) = (layout.cell(*idx), items.get(*idx)) else {
-                        continue;
-                    };
-                    if item.is_header() {
+                for tile in self.tiles.borrow().values() {
+                    let Some(idx) = tile.idx else { continue };
+                    if tile.is_header() {
                         continue;
                     }
-                    let is_selected = selected.contains(&item.key);
-                    if !is_selected && !preview.contains(idx) {
+                    let is_selected = selected.contains(&tile.key);
+                    if !is_selected && !preview.contains(&idx) {
                         continue;
                     }
-                    let rect = graphene::Rect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32);
-                    snapshot.append_color(&with_alpha(if is_selected { 0.30 } else { 0.18 }), &rect);
+                    let c = tile.cur;
+                    let fade = c.a;
+                    let rect = graphene::Rect::new(c.x, c.y, c.w, c.h + c.lh);
+                    snapshot.append_color(
+                        &with_alpha(if is_selected { 0.30 } else { 0.18 } * fade),
+                        &rect,
+                    );
                     if is_selected {
-                        let border = [with_alpha(1.0); 4];
+                        let border = [with_alpha(fade); 4];
                         snapshot.append_border(
                             &gsk::RoundedRect::from_rect(rect, 0.0),
                             &[3.0; 4],
@@ -534,17 +694,287 @@ mod imp {
             layout
         }
 
+        /// Replaces the items. Tiles whose key survives move to their new place, new keys
+        /// fade in, and removed keys fade out.
         pub fn set_items(&self, items: Vec<GridItem>, reset_scroll: bool) {
-            self.release_all();
+            *self.ids.borrow_mut() = Rc::new(item_ids(&items));
             *self.items.borrow_mut() = Rc::new(items);
+            self.transition(if reset_scroll {
+                ScrollMode::Top
+            } else {
+                ScrollMode::Keep
+            });
+        }
+
+        /// Recomputes the layout after items, zoom, or label visibility changed and animates
+        /// the tiles to it. The scroll offset follows `mode` and is applied together with
+        /// the new content height, so tile positions stay continuous on screen.
+        ///
+        /// A jump to the top from a scrolled position cross-fades instead of sliding, since
+        /// the old and new positions would be unrelated on screen.
+        pub fn transition(&self, mode: ScrollMode) {
+            let obj = self.obj();
+            let width = obj.width();
             *self.layout.borrow_mut() = None;
-            if reset_scroll {
-                if let Some(adj) = self.vadj.borrow().as_ref() {
+            let adj = self.vadj.borrow().clone();
+            if width <= 0 {
+                // Not allocated yet: the first allocation places everything instantly.
+                self.release_all();
+                *self.shown.borrow_mut() = None;
+                if let (ScrollMode::Top, Some(adj)) = (mode, &adj) {
                     adj.set_value(0.0);
                 }
+                obj.queue_resize();
+                self.queue_sync();
+                return;
             }
-            self.obj().queue_resize();
-            self.queue_sync();
+            let layout = self.layout_for(width);
+            let (old_value, old_upper, page) = adj
+                .as_ref()
+                .map_or((0.0, 0.0, 1.0), |a| (a.value(), a.upper(), a.page_size().max(1.0)));
+            let upper = (layout.height as f64).max(page);
+            let value = scroll_target(mode, old_value, old_upper, page, layout.height);
+            let moves = !(matches!(mode, ScrollMode::Top) && old_value > 0.5);
+            self.retarget(width, true, moves, (value - old_value) as f32);
+            if let Some(adj) = adj {
+                // Set the new range ourselves; the viewport only does so after the next
+                // allocation, which would show one frame at the wrong offset.
+                adj.configure(
+                    value,
+                    adj.lower(),
+                    upper,
+                    adj.step_increment(),
+                    adj.page_increment(),
+                    page,
+                );
+            }
+            self.sync();
+            obj.queue_resize();
+        }
+
+        /// Called from `size_allocate` when the widget width changed. Only a column count
+        /// change (or an animation already running) animates; plain resizing follows the
+        /// window directly.
+        fn on_width_changed(&self, width: i32) {
+            let layout = self.layout_for(width);
+            let columns_changed = self
+                .shown
+                .borrow()
+                .as_ref()
+                .is_some_and(|(_, old)| old.columns != layout.columns);
+            let animate = columns_changed || self.transition.borrow().is_some();
+            self.retarget(width, animate, true, 0.0);
+        }
+
+        fn animations_enabled(&self) -> bool {
+            gtk4::Settings::default().map_or(true, |s| s.is_gtk_enable_animations())
+        }
+
+        /// Visual end state of item `idx` in `layout`.
+        fn target_vis(&self, layout: &Layout, idx: usize) -> Vis {
+            let r = layout.rects[idx];
+            let header = layout.is_header(idx);
+            Vis {
+                x: r.x as f32,
+                y: r.y as f32,
+                w: r.w as f32,
+                h: r.h as f32,
+                lh: if header { 0.0 } else { layout.label_height as f32 },
+                a: 1.0,
+                la: if header || self.show_names.get() { 1.0 } else { 0.0 },
+            }
+        }
+
+        /// Points every realized tile at its place in the current layout. With `animate`
+        /// the tiles start from where they are drawn now (plus `shift`, the scroll change);
+        /// otherwise they jump. With `moves` false every tile fades out and the new ones
+        /// fade in instead of sliding.
+        fn retarget(&self, width: i32, animate: bool, moves: bool, shift: f32) {
+            let layout = self.layout_for(width);
+            let ids = self.ids.borrow().clone();
+            let items = self.items.borrow().clone();
+            let old = self.shown.borrow().clone();
+            self.placed_width.set(width);
+
+            let unchanged = old.as_ref().is_some_and(|(old_ids, old_layout)| {
+                **old_ids == *ids
+                    && old_layout.rects == layout.rects
+                    && old_layout.is_header == layout.is_header
+                    && old_layout.label_height == layout.label_height
+            });
+            *self.shown.borrow_mut() = Some((ids.clone(), layout.clone()));
+            if unchanged {
+                return;
+            }
+
+            let animate = animate
+                && self.animations_enabled()
+                && old.as_ref().is_some_and(|(old_ids, _)| !old_ids.is_empty());
+            if !animate {
+                self.finish_animation();
+            }
+
+            let show = self.show_names.get();
+            let index: HashMap<&str, usize> = if animate && !moves {
+                HashMap::new()
+            } else {
+                ids.iter()
+                    .enumerate()
+                    .map(|(i, id)| (id.as_str(), i))
+                    .collect()
+            };
+
+            // Tiles whose item is gone.
+            let gone: Vec<String> = self
+                .tiles
+                .borrow()
+                .keys()
+                .filter(|id| !index.contains_key(id.as_str()))
+                .cloned()
+                .collect();
+            for id in gone {
+                let Some(mut tile) = self.tiles.borrow_mut().remove(&id) else {
+                    continue;
+                };
+                if animate {
+                    tile.idx = None;
+                    tile.cur.y += shift;
+                    tile.from = tile.cur;
+                    tile.to = Vis { a: 0.0, ..tile.cur };
+                    self.leaving.borrow_mut().push(tile);
+                } else {
+                    self.release_tile(tile);
+                }
+            }
+            for tile in self.leaving.borrow_mut().iter_mut() {
+                tile.cur.y += shift;
+                tile.from = tile.cur;
+                tile.to = Vis { a: 0.0, ..tile.cur };
+            }
+
+            // Tiles that stay.
+            let scale = self.obj().scale_factor();
+            for (id, tile) in self.tiles.borrow_mut().iter_mut() {
+                let idx = index[id.as_str()];
+                let item = &items[idx];
+                tile.idx = Some(idx);
+                let mut to = self.target_vis(&layout, idx);
+                if !tile.is_header() {
+                    if show && tile.label.is_none() {
+                        tile.label = Some(self.new_label(&item.file_name));
+                        tile.cur.la = if animate { 0.0 } else { 1.0 };
+                    }
+                    if !show {
+                        to.la = 0.0;
+                        if !animate {
+                            self.drop_label(tile);
+                        }
+                    }
+                    // Keep the old thumbnail until a sharper one arrives.
+                    let needed = to.w as i32 * scale;
+                    if needed > tile.thumb_px {
+                        self.request_thumb(tile, item, needed);
+                    }
+                }
+                if animate {
+                    tile.cur.y += shift;
+                    tile.from = tile.cur;
+                } else {
+                    tile.from = to;
+                    tile.cur = to;
+                }
+                tile.to = to;
+                tile.apply();
+            }
+
+            if animate {
+                let prev = if moves {
+                    old.map_or_else(HashMap::new, |(old_ids, old_layout)| {
+                        old_ids
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| *i < old_layout.rects.len())
+                            .map(|(i, id)| {
+                                let mut v = self.target_vis(&old_layout, i);
+                                v.y += shift;
+                                v.la = if old_layout.label_height > 0 || old_layout.is_header(i) {
+                                    1.0
+                                } else {
+                                    0.0
+                                };
+                                (id.clone(), v)
+                            })
+                            .collect()
+                    })
+                } else {
+                    HashMap::new()
+                };
+                *self.transition.borrow_mut() = Some(Transition { prev });
+                self.start_animation();
+            }
+        }
+
+        fn start_animation(&self) {
+            self.anim_start.set(None);
+            self.anim_e.set(0.0);
+            if self.ticking.replace(true) {
+                return;
+            }
+            let weak = self.obj().downgrade();
+            self.obj().add_tick_callback(move |_, clock| match weak.upgrade() {
+                Some(obj) => obj.imp().tick(clock.frame_time()),
+                None => glib::ControlFlow::Break,
+            });
+        }
+
+        fn tick(&self, now: i64) -> glib::ControlFlow {
+            if self.transition.borrow().is_none() {
+                self.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
+            let start = self.anim_start.get().unwrap_or_else(|| {
+                self.anim_start.set(Some(now));
+                now
+            });
+            let t = progress(now - start);
+            let eased = ease_out_cubic(t);
+            self.anim_e.set(eased);
+            for tile in self.tiles.borrow_mut().values_mut() {
+                tile.step(eased);
+                tile.apply();
+            }
+            for tile in self.leaving.borrow_mut().iter_mut() {
+                tile.step(eased);
+                tile.apply();
+            }
+            let obj = self.obj();
+            obj.queue_allocate();
+            obj.queue_draw();
+            if t >= 1.0 {
+                self.finish_animation();
+                self.ticking.set(false);
+                return glib::ControlFlow::Break;
+            }
+            glib::ControlFlow::Continue
+        }
+
+        /// Snaps every tile to its end state, removes tiles that faded out, and drops
+        /// labels that faded out.
+        fn finish_animation(&self) {
+            let leaving: Vec<Tile> = self.leaving.borrow_mut().drain(..).collect();
+            for tile in leaving {
+                self.release_tile(tile);
+            }
+            for tile in self.tiles.borrow_mut().values_mut() {
+                tile.from = tile.to;
+                tile.cur = tile.to;
+                if tile.to.la <= 0.0 && !tile.is_header() {
+                    self.drop_label(tile);
+                }
+                tile.apply();
+            }
+            *self.transition.borrow_mut() = None;
+            self.anim_e.set(1.0);
         }
 
         fn queue_sync(&self) {
@@ -560,7 +990,9 @@ mod imp {
             });
         }
 
-        /// Realizes tiles near the viewport and recycles those far away.
+        /// Realizes tiles near the viewport and recycles those far away. A tile realized
+        /// while a transition runs joins it: it slides from its old position when the item
+        /// existed before, and fades in otherwise.
         pub fn sync(&self) {
             let obj = self.obj();
             let width = obj.width();
@@ -575,30 +1007,42 @@ mod imp {
 
             let near = (value - page * REALIZE_PAD, value + page + page * REALIZE_PAD);
             let far = (value - page * RECYCLE_PAD, value + page + page * RECYCLE_PAD);
-            let overlaps = |r: &Rect, (top, bottom): (f64, f64)| {
-                (r.bottom() as f64) > top && (r.y as f64) < bottom
-            };
 
-            let stale: Vec<usize> = self
+            // A tile stays while either its drawn or its final position is near the view.
+            let stale: Vec<String> = self
                 .tiles
                 .borrow()
-                .keys()
-                .copied()
-                .filter(|i| layout.cell(*i).map_or(true, |r| !overlaps(&r, far)))
+                .iter()
+                .filter(|(_, t)| {
+                    let drawn = overlaps(t.cur.y as f64, (t.cur.y + t.cur.h + t.cur.lh) as f64, far);
+                    let target = t
+                        .idx
+                        .and_then(|i| layout.cell(i))
+                        .is_some_and(|r| overlaps(r.y as f64, r.bottom() as f64, far));
+                    !(drawn || target)
+                })
+                .map(|(id, _)| id.clone())
                 .collect();
-            for idx in stale {
-                self.release(idx);
+            for id in stale {
+                if let Some(tile) = self.tiles.borrow_mut().remove(&id) {
+                    self.release_tile(tile);
+                }
             }
 
             let items = self.items.borrow().clone();
+            let ids = self.ids.borrow().clone();
             let mut added = false;
             for idx in 0..layout.rects.len() {
                 let Some(cell) = layout.cell(idx) else { continue };
-                if overlaps(&cell, near) && !self.tiles.borrow().contains_key(&idx) {
-                    if let Some(item) = items.get(idx) {
-                        self.acquire(idx, item, &layout.rects[idx]);
-                        added = true;
-                    }
+                if !overlaps(cell.y as f64, cell.bottom() as f64, near) {
+                    continue;
+                }
+                let (Some(item), Some(id)) = (items.get(idx), ids.get(idx)) else {
+                    continue;
+                };
+                if !self.tiles.borrow().contains_key(id) {
+                    self.acquire(id, idx, item, &layout);
+                    added = true;
                 }
             }
             if added {
@@ -606,8 +1050,52 @@ mod imp {
             }
         }
 
-        fn acquire(&self, idx: usize, item: &GridItem, rect: &Rect) {
-            if let Some(title) = item.section_title.as_deref() {
+        fn new_label(&self, text: &str) -> Label {
+            let label = self.label_pool.borrow_mut().pop().unwrap_or_else(|| {
+                let l = Label::new(None);
+                l.set_xalign(0.0);
+                l.set_single_line_mode(true);
+                l.set_ellipsize(gtk4::pango::EllipsizeMode::End);
+                l.set_valign(gtk4::Align::Center);
+                l
+            });
+            label.remove_css_class("walltag-section-header");
+            label.add_css_class("walltag-tile-name");
+            label.set_text(text);
+            label.set_parent(&*self.obj());
+            label
+        }
+
+        fn request_thumb(&self, tile: &mut Tile, item: &GridItem, px: i32) {
+            let Some(picture) = tile.picture.clone() else {
+                return;
+            };
+            tile.cancel.store(true, Ordering::Relaxed);
+            tile.cancel = Arc::new(AtomicBool::new(false));
+            tile.thumb_px = px;
+            self.thumbs
+                .request(&item.path, px, item.natural_width, tile.cancel.clone(), move |tex| {
+                    picture.set_paintable(Some(tex));
+                });
+        }
+
+        fn acquire(&self, id: &str, idx: usize, item: &GridItem, layout: &Layout) {
+            let to = self.target_vis(layout, idx);
+            let cur_from = match self.transition.borrow().as_ref() {
+                Some(tr) => {
+                    let from = tr.prev.get(id).copied().unwrap_or(Vis { a: 0.0, ..to });
+                    Some(from)
+                }
+                None => None,
+            };
+            let from = cur_from.unwrap_or(to);
+            let cur = if cur_from.is_some() {
+                from.lerp(to, self.anim_e.get())
+            } else {
+                to
+            };
+
+            let mut tile = if let Some(title) = item.section_title.as_deref() {
                 let label = self.label_pool.borrow_mut().pop().unwrap_or_else(|| {
                     let l = Label::new(None);
                     l.set_xalign(0.0);
@@ -620,87 +1108,90 @@ mod imp {
                 label.remove_css_class("walltag-tile-name");
                 label.add_css_class("walltag-section-header");
                 label.set_parent(&*self.obj());
-                self.tiles.borrow_mut().insert(
-                    idx,
-                    Tile {
-                        picture: None,
-                        label: Some(label),
-                        cancel: Arc::new(AtomicBool::new(false)),
-                    },
-                );
-                return;
-            }
-
-            let picture = self.pool.borrow_mut().pop().unwrap_or_else(|| {
-                let p = Picture::new();
-                p.set_can_shrink(true);
-                p.set_content_fit(ContentFit::Fill);
-                p.add_css_class("walltag-thumb");
-                p
-            });
-            picture.set_parent(&*self.obj());
-
-            let cancel = Arc::new(AtomicBool::new(false));
-            let target = picture.clone();
-            let px = rect.w * self.obj().scale_factor();
-            self.thumbs
-                .request(&item.path, px, item.natural_width, cancel.clone(), move |tex| {
-                    target.set_paintable(Some(tex));
-                });
-            let label = self.show_names.get().then(|| {
-                let label = self.label_pool.borrow_mut().pop().unwrap_or_else(|| {
-                    let l = Label::new(None);
-                    l.set_xalign(0.0);
-                    l.set_single_line_mode(true);
-                    l.set_ellipsize(gtk4::pango::EllipsizeMode::End);
-                    l.set_valign(gtk4::Align::Center);
-                    l
-                });
-                label.remove_css_class("walltag-section-header");
-                label.add_css_class("walltag-tile-name");
-                label.set_text(&item.file_name);
-                label.set_parent(&*self.obj());
-                label
-            });
-            self.tiles.borrow_mut().insert(
-                idx,
                 Tile {
+                    key: item.key.clone(),
+                    picture: None,
+                    label: Some(label),
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    thumb_px: 0,
+                    idx: Some(idx),
+                    from,
+                    to,
+                    cur,
+                }
+            } else {
+                let picture = self.pool.borrow_mut().pop().unwrap_or_else(|| {
+                    let p = Picture::new();
+                    p.set_can_shrink(true);
+                    p.set_content_fit(ContentFit::Fill);
+                    p.add_css_class("walltag-thumb");
+                    p
+                });
+                picture.set_parent(&*self.obj());
+                let label = self.show_names.get().then(|| self.new_label(&item.file_name));
+                Tile {
+                    key: item.key.clone(),
                     picture: Some(picture),
                     label,
-                    cancel,
-                },
-            );
+                    cancel: Arc::new(AtomicBool::new(false)),
+                    thumb_px: 0,
+                    idx: Some(idx),
+                    from,
+                    to,
+                    cur,
+                }
+            };
+            if !tile.is_header() {
+                let px = layout.rects[idx].w * self.obj().scale_factor();
+                self.request_thumb(&mut tile, item, px);
+            }
+            tile.apply();
+            self.tiles.borrow_mut().insert(id.to_owned(), tile);
         }
 
-        fn release(&self, idx: usize) {
-            let Some(tile) = self.tiles.borrow_mut().remove(&idx) else {
-                return;
-            };
+        fn drop_label(&self, tile: &mut Tile) {
+            if let Some(label) = tile.label.take() {
+                self.recycle_label(label);
+            }
+        }
+
+        fn recycle_label(&self, label: Label) {
+            label.unparent();
+            label.set_opacity(1.0);
+            label.remove_css_class("walltag-section-header");
+            label.remove_css_class("walltag-tile-name");
+            let mut pool = self.label_pool.borrow_mut();
+            if pool.len() < MAX_POOL {
+                pool.push(label);
+            }
+        }
+
+        fn release_tile(&self, tile: Tile) {
             tile.cancel.store(true, Ordering::Relaxed);
             if let Some(picture) = tile.picture {
                 picture.set_paintable(None::<&gtk4::gdk::Paintable>);
                 picture.unparent();
+                picture.set_opacity(1.0);
                 let mut pool = self.pool.borrow_mut();
                 if pool.len() < MAX_POOL {
                     pool.push(picture);
                 }
             }
             if let Some(label) = tile.label {
-                label.unparent();
-                label.remove_css_class("walltag-section-header");
-                label.remove_css_class("walltag-tile-name");
-                let mut pool = self.label_pool.borrow_mut();
-                if pool.len() < MAX_POOL {
-                    pool.push(label);
-                }
+                self.recycle_label(label);
             }
         }
 
         pub fn release_all(&self) {
-            let indices: Vec<usize> = self.tiles.borrow().keys().copied().collect();
-            for idx in indices {
-                self.release(idx);
+            let tiles: Vec<Tile> = self.tiles.borrow_mut().drain().map(|(_, t)| t).collect();
+            for tile in tiles {
+                self.release_tile(tile);
             }
+            let leaving: Vec<Tile> = self.leaving.borrow_mut().drain(..).collect();
+            for tile in leaving {
+                self.release_tile(tile);
+            }
+            *self.transition.borrow_mut() = None;
         }
     }
 }
@@ -709,7 +1200,9 @@ use gtk4::prelude::*;
 use gtk4::subclass::prelude::ObjectSubclassIsExt;
 use std::collections::HashSet;
 
-use gtk4::{glib, Adjustment, GestureDrag};
+use gtk4::{
+    gdk, glib, Adjustment, EventControllerScroll, EventControllerScrollFlags, GestureDrag,
+};
 
 glib::wrapper! {
     /// Vertically scrolling masonry of image tiles with zero spacing.
@@ -788,6 +1281,29 @@ impl MasonryGrid {
         });
         grid.add_controller(drag);
 
+        let scroll_zoom =
+            EventControllerScroll::new(EventControllerScrollFlags::VERTICAL);
+        let weak = grid.downgrade();
+        scroll_zoom.connect_scroll(move |controller, _dx, dy| {
+            let ctrl = controller.current_event().is_some_and(|e| {
+                e.modifier_state()
+                    .contains(gdk::ModifierType::CONTROL_MASK)
+            });
+            if !ctrl {
+                return glib::Propagation::Proceed;
+            }
+            let Some(grid) = weak.upgrade() else {
+                return glib::Propagation::Stop;
+            };
+            if dy < 0.0 {
+                grid.zoom_in();
+            } else if dy > 0.0 {
+                grid.zoom_out();
+            }
+            glib::Propagation::Stop
+        });
+        grid.add_controller(scroll_zoom);
+
         grid.set_has_tooltip(true);
         grid.connect_query_tooltip(|grid, x, y, _keyboard, tooltip| {
             match grid.item_at(x as f64, y as f64) {
@@ -820,22 +1336,8 @@ impl MasonryGrid {
             (upper > 0.0).then(|| adj.value() / upper)
         });
         imp.zoom.set(zoom);
-        *imp.layout.borrow_mut() = None;
-        imp.release_all();
-        self.queue_resize();
-        // `upper` only changes after the next allocation; restore the offset then.
-        if let Some(relative) = relative {
-            let weak = self.downgrade();
-            self.add_tick_callback(move |_, _| {
-                if let Some(grid) = weak.upgrade() {
-                    if let Some(adj) = grid.imp().vadj.borrow().as_ref() {
-                        let max = (adj.upper() - adj.page_size()).max(0.0);
-                        adj.set_value((relative * adj.upper()).min(max));
-                    }
-                }
-                glib::ControlFlow::Break
-            });
-        }
+        // Tiles slide and resize to the new layout; the scroll offset keeps its fraction.
+        imp.transition(relative.map_or(ScrollMode::Keep, ScrollMode::Relative));
         for callback in imp.on_zoom.borrow().clone() {
             callback(zoom);
         }
@@ -847,9 +1349,7 @@ impl MasonryGrid {
         if imp.show_names.replace(show) == show {
             return;
         }
-        *imp.layout.borrow_mut() = None;
-        imp.release_all();
-        self.queue_resize();
+        imp.transition(ScrollMode::Keep);
     }
 
     pub fn zoom_in(&self) {
@@ -869,7 +1369,9 @@ impl MasonryGrid {
         self.imp().on_zoom.borrow_mut().push(Rc::new(f));
     }
 
-    /// Replaces all tiles. Pass `reset_scroll` to jump back to the top.
+    /// Replaces the items and animates the tiles to the new layout: kept keys slide and
+    /// resize, new keys fade in, removed keys fade out. The first fill from an empty grid
+    /// is instant. Pass `reset_scroll` to jump back to the top (cross-fade when scrolled).
     /// Selected wallpapers that are no longer present are dropped from the edit batch.
     pub fn set_items(&self, items: Vec<GridItem>, reset_scroll: bool) {
         let present: HashSet<&str> = items.iter().map(|i| i.key.as_str()).collect();
@@ -883,6 +1385,17 @@ impl MasonryGrid {
         if pruned {
             self.notify_selection();
         }
+    }
+
+    /// Replaces the tiles when `items` differ from the current list.
+    /// Returns `false` when the list is unchanged so in-flight thumbnails stay put.
+    /// `reset_scroll` always replaces, including when the lists match.
+    pub fn replace_items_if_changed(&self, items: Vec<GridItem>, reset_scroll: bool) -> bool {
+        if !reset_scroll && self.imp().items.borrow().as_ref() == items.as_slice() {
+            return false;
+        }
+        self.set_items(items, reset_scroll);
+        true
     }
 
     /// Keys of the wallpapers in the edit batch, in gallery order.
@@ -1236,5 +1749,78 @@ mod tests {
         assert!(!d.moved_past_threshold());
         d.current = (10.0, 17.0);
         assert!(d.moved_past_threshold());
+    }
+
+    #[test]
+    fn ease_out_cubic_is_monotonic_and_bounded() {
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0);
+        let mut last = 0.0;
+        for i in 1..=100 {
+            let v = ease_out_cubic(i as f32 / 100.0);
+            assert!(v >= last);
+            last = v;
+        }
+        // Ease-out: more than half done at half time.
+        assert!(ease_out_cubic(0.5) > 0.5);
+    }
+
+    #[test]
+    fn progress_reaches_one_after_the_duration() {
+        assert_eq!(progress(-5), 0.0);
+        assert_eq!(progress(0), 0.0);
+        assert!((progress((ANIM_DURATION_MS * 500.0) as i64) - 0.5).abs() < 1e-3);
+        assert_eq!(progress((ANIM_DURATION_MS * 1000.0) as i64), 1.0);
+        assert_eq!(progress(i64::MAX), 1.0);
+    }
+
+    #[test]
+    fn vis_lerp_interpolates_every_field() {
+        let a = Vis { x: 0.0, y: 10.0, w: 100.0, h: 50.0, lh: 0.0, a: 0.0, la: 0.0 };
+        let b = Vis { x: 20.0, y: 30.0, w: 200.0, h: 150.0, lh: 20.0, a: 1.0, la: 1.0 };
+        assert_eq!(a.lerp(b, 0.0), a);
+        assert_eq!(a.lerp(b, 1.0), b);
+        let m = a.lerp(b, 0.5);
+        assert_eq!((m.x, m.y, m.w, m.h, m.lh, m.a, m.la), (10.0, 20.0, 150.0, 100.0, 10.0, 0.5, 0.5));
+    }
+
+    #[test]
+    fn layout_reports_column_count() {
+        let layout = compute_layout(&aspects(), 1100);
+        assert_eq!(layout.columns, columns_for_width(1100));
+    }
+
+    #[test]
+    fn tile_ids_are_unique_even_for_repeated_keys() {
+        let mk = |k: &str| GridItem {
+            key: k.into(),
+            path: PathBuf::new(),
+            aspect: 1.0,
+            natural_width: 0,
+            tooltip: String::new(),
+            file_name: String::new(),
+            section_title: None,
+        };
+        let items = vec![mk("a"), mk("b"), mk("a"), GridItem::header("g"), mk("a")];
+        let ids = item_ids(&items);
+        assert_eq!(ids[0], "a");
+        assert_eq!(ids[1], "b");
+        assert_eq!(ids[3], "header:g");
+        let unique: HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), items.len());
+    }
+
+    #[test]
+    fn scroll_target_clamps_to_content() {
+        assert_eq!(scroll_target(ScrollMode::Top, 500.0, 2000.0, 600.0, 3000), 0.0);
+        assert_eq!(scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 3000), 500.0);
+        // Content shrinks below the offset: clamp to the new maximum.
+        assert_eq!(scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 800), 200.0);
+        // Content shorter than the viewport: no scrolling.
+        assert_eq!(scroll_target(ScrollMode::Keep, 500.0, 2000.0, 600.0, 300), 0.0);
+        assert_eq!(scroll_target(ScrollMode::Relative(0.5), 0.0, 2000.0, 600.0, 3000), 1500.0);
+        assert_eq!(scroll_target(ScrollMode::Relative(0.9), 0.0, 2000.0, 600.0, 1000), 400.0);
     }
 }

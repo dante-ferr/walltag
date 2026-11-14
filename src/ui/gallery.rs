@@ -8,9 +8,10 @@ use gtk4::{gio, glib, Box, Label, Orientation, PolicyType, ScrolledWindow, Searc
 use crate::backends::ApplyOptions;
 use crate::metadata::MetadataStore;
 use crate::scan::WallpaperEntry;
-use crate::ui::filter::{build_rows, GalleryFilter, GalleryRow};
+use crate::ui::color::probe_colors;
+use crate::ui::dim_cache::{resolve_dimensions, DimensionCache};
+use crate::ui::filter::{build_rows, GalleryFilter, GalleryRow, SortBy, SortData};
 use crate::ui::masonry::{GridItem, MasonryGrid, FALLBACK_ASPECT};
-use crate::ui::thumbs::probe_dimensions;
 use crate::AppConfig;
 use crate::Cli;
 
@@ -22,20 +23,27 @@ pub struct GalleryModel {
     metadata: Rc<RefCell<MetadataStore>>,
     config: Rc<RefCell<AppConfig>>,
     filter: Rc<RefCell<GalleryFilter>>,
+    /// File stats and sampled colors that the sort modes read.
+    sort_data: Rc<RefCell<SortData>>,
 }
 
 impl GalleryModel {
     /// `config` is shared with the rest of the UI so sidebar changes apply immediately.
     pub fn new(config: Rc<RefCell<AppConfig>>, metadata: MetadataStore) -> Self {
-        let group_by = config.borrow().group_by;
+        let (group_by, sort_by) = {
+            let cfg = config.borrow();
+            (cfg.group_by, cfg.sort_by)
+        };
         Self {
             entries: Rc::new(RefCell::new(Vec::new())),
             metadata: Rc::new(RefCell::new(metadata)),
             config,
             filter: Rc::new(RefCell::new(GalleryFilter {
                 group_by,
+                sort_by,
                 ..Default::default()
             })),
+            sort_data: Rc::new(RefCell::new(SortData::default())),
         }
     }
 
@@ -61,6 +69,32 @@ impl GalleryModel {
 
     pub fn filter(&self) -> Rc<RefCell<GalleryFilter>> {
         self.filter.clone()
+    }
+
+    pub fn sort_data(&self) -> Rc<RefCell<SortData>> {
+        self.sort_data.clone()
+    }
+
+    /// Samples average colors for entries that have none, when the hue sort is active.
+    /// Returns `true` if new colors were stored. Results are dropped when `generation`
+    /// no longer matches `current` (the folder was rescanned meanwhile).
+    async fn load_colors(&self, current: &Cell<u64>, generation: u64) -> bool {
+        if self.filter.borrow().sort_by != SortBy::Hue {
+            return false;
+        }
+        let missing = self.sort_data.borrow().missing_colors(&self.entries.borrow());
+        if missing.is_empty() {
+            return false;
+        }
+        let input = missing.clone();
+        let Ok(found) = gio::spawn_blocking(move || probe_colors(input)).await else {
+            return false;
+        };
+        if current.get() != generation {
+            return false;
+        }
+        self.sort_data.borrow_mut().record_colors(&missing, found);
+        true
     }
 }
 
@@ -116,7 +150,9 @@ impl GalleryView {
         self.on_repopulated.borrow_mut().push(Rc::new(f));
     }
 
-    /// Rebuilds the grid from the current entries, metadata, and filter.
+    /// Rebuilds the grid from the current entries, metadata, filter, and sort. With the
+    /// hue sort, colors that are not cached yet are sampled in the background and the grid
+    /// is rebuilt once they arrive.
     pub fn refresh(&self, reset_scroll: bool) {
         populate(
             &self.grid,
@@ -124,6 +160,27 @@ impl GalleryView {
             &self.dimensions.borrow(),
             reset_scroll,
         );
+        self.notify_repopulated();
+
+        let grid = self.grid.clone();
+        let model = self.model.clone();
+        let dimensions = self.dimensions.clone();
+        let current = self.generation.clone();
+        let generation = current.get();
+        let on_repopulated = self.on_repopulated.clone();
+        glib::spawn_future_local(async move {
+            if !model.load_colors(&current, generation).await {
+                return;
+            }
+            if populate(&grid, &model, &dimensions.borrow(), false) {
+                for cb in on_repopulated.borrow().iter() {
+                    cb();
+                }
+            }
+        });
+    }
+
+    fn notify_repopulated(&self) {
         for cb in self.on_repopulated.borrow().iter() {
             cb();
         }
@@ -143,12 +200,16 @@ impl GalleryView {
         });
     }
 
-    /// Replaces the gallery contents. Image sizes are read on a worker thread first so the
-    /// masonry lays out once with the correct aspect ratios.
+    /// Replaces the gallery contents and paints immediately.
+    ///
+    /// Saved sizes are applied up front so a warm cache lays out with the real aspect
+    /// ratios. Stats, cache misses, and hue samples finish on a worker and update the
+    /// grid only when the order or the sizes actually change.
     pub fn reload_from_scan(&self, entries: Vec<WallpaperEntry>) {
         self.generation.set(self.generation.get() + 1);
         let generation = self.generation.get();
 
+        let root = self.model.config().borrow().wallpaper_root.clone();
         let probe_input: Vec<_> = entries
             .iter()
             .map(|e| (e.relative_key.clone(), e.absolute.clone()))
@@ -158,8 +219,9 @@ impl GalleryView {
         self.model.filter.borrow_mut().tag = None;
         self.model.filter.borrow_mut().folder = None;
         self.model.set_entries(entries);
-        self.dimensions.borrow_mut().clear();
-        self.grid.set_items(Vec::new(), true);
+        *self.dimensions.borrow_mut() = DimensionCache::load(&root).unvalidated();
+        populate(&self.grid, &self.model, &self.dimensions.borrow(), true);
+        self.notify_repopulated();
 
         let grid = self.grid.clone();
         let model = self.model.clone();
@@ -167,7 +229,10 @@ impl GalleryView {
         let current = self.generation.clone();
         let on_repopulated = self.on_repopulated.clone();
         glib::spawn_future_local(async move {
-            let Ok(found) = gio::spawn_blocking(move || probe_dimensions(probe_input)).await
+            let root_for_probe = root.clone();
+            let Ok((found, stats)) =
+                gio::spawn_blocking(move || resolve_dimensions(&root_for_probe, &probe_input))
+                    .await
             else {
                 return;
             };
@@ -175,9 +240,22 @@ impl GalleryView {
                 return;
             }
             *dimensions.borrow_mut() = found;
-            populate(&grid, &model, &dimensions.borrow(), true);
-            for cb in on_repopulated.borrow().iter() {
-                cb();
+            model.sort_data().borrow_mut().replace_stats(stats);
+            if populate(&grid, &model, &dimensions.borrow(), false) {
+                for cb in on_repopulated.borrow().iter() {
+                    cb();
+                }
+            }
+            if !model.load_colors(&current, generation).await {
+                return;
+            }
+            if current.get() != generation {
+                return;
+            }
+            if populate(&grid, &model, &dimensions.borrow(), false) {
+                for cb in on_repopulated.borrow().iter() {
+                    cb();
+                }
             }
         });
     }
@@ -209,16 +287,23 @@ impl GalleryView {
     }
 }
 
+/// Rebuilds the visible rows. Returns `false` when `reset_scroll` is false and the
+/// rows already match, so thumbnails that are already decoding are left alone.
 fn populate(
     grid: &MasonryGrid,
     model: &GalleryModel,
     dimensions: &HashMap<String, (i32, i32)>,
     reset_scroll: bool,
-) {
+) -> bool {
     let metadata = model.metadata();
     let metadata = metadata.borrow();
     let filter = model.filter.borrow().clone();
-    let rows = build_rows(&model.entries().borrow(), &metadata, &filter);
+    let rows = build_rows(
+        &model.entries().borrow(),
+        &metadata,
+        &filter,
+        &model.sort_data().borrow(),
+    );
     let items: Vec<GridItem> = rows
         .into_iter()
         .map(|row| match row {
@@ -242,7 +327,12 @@ fn populate(
             }
         })
         .collect();
-    grid.set_items(items, reset_scroll);
+    if reset_scroll {
+        grid.set_items(items, true);
+        true
+    } else {
+        grid.replace_items_if_changed(items, false)
+    }
 }
 
 fn tooltip_text(file_name: &str, tags: &[String]) -> String {
@@ -279,7 +369,12 @@ pub fn set_random_wallpaper(model: &GalleryModel) -> anyhow::Result<Option<Strin
     let metadata = model.metadata();
     let metadata = metadata.borrow();
     let filter = model.filter.borrow().clone();
-    let rows = build_rows(&model.entries().borrow(), &metadata, &filter);
+    let rows = build_rows(
+        &model.entries().borrow(),
+        &metadata,
+        &filter,
+        &model.sort_data().borrow(),
+    );
     let candidates: Vec<_> = rows
         .into_iter()
         .filter_map(|r| match r {
@@ -357,25 +452,109 @@ pub fn default_app_css() -> &'static str {
       color: @window_fg_color;
       opacity: 0.85;
     }
-    /* Flat dropdown indicator: no chip, border, or extra padding around the arrow. */
-    row.combo image.dropdown-arrow,
-    row.combo .suffixes image,
-    dropdown arrow,
-    dropdown > box > button.toggle,
-    dropdown > box > button.toggle:hover,
-    dropdown > box > button.toggle:active,
-    dropdown > box > button.toggle:checked {
+    /* walltag-css-start */
+    /* Compact sidebar: tighter rows, headers, and gaps between groups. */
+    .walltag-sidebar preferencesgroup > box {
+      border-spacing: 4px;
+    }
+    .walltag-sidebar preferencesgroup > box > box > label.heading {
+      font-size: 0.95em;
+    }
+    .walltag-sidebar row {
+      min-height: 0;
+    }
+    .walltag-sidebar row > box.header {
+      min-height: 34px;
+      padding: 0 8px;
+      border-spacing: 8px;
+    }
+    .walltag-sidebar row > box.header > box.title {
+      margin: 3px 0;
+    }
+    .walltag-sidebar row.entry {
+      min-height: 0;
+    }
+    .walltag-sidebar row.entry > box.header {
+      padding: 0 8px;
+    }
+    .walltag-sidebar row.spin > box.header {
+      min-height: 34px;
+    }
+    .walltag-sidebar row > box.header > box.suffixes button.pill {
+      min-height: 0;
+      padding: 3px 14px;
+    }
+    .walltag-sidebar row > box.header > box.suffixes entry {
+      min-height: 0;
+      padding-top: 3px;
+      padding-bottom: 3px;
+    }
+    /* Dropdown rows: the selected value and arrow never get a hover chip. */
+    row.combo > box.header > box.suffixes listview,
+    row.combo > box.header > box.suffixes listview > row,
+    row.combo > box.header > box.suffixes listview > row:hover,
+    row.combo > box.header > box.suffixes listview > row:active,
+    row.combo > box.header > box.suffixes listview > row:focus {
       background: none;
       background-color: transparent;
       box-shadow: none;
       border: none;
       outline: none;
-      padding: 0;
       min-height: 0;
-      min-width: 0;
+      padding: 0 2px;
     }
-    row.combo image.dropdown-arrow {
+    row.combo > box.header > box.suffixes image.dropdown-arrow,
+    row.combo > box.header > box.suffixes image.dropdown-arrow:hover {
+      -gtk-icon-size: 20px;
+      background: none;
+      background-color: transparent;
+      box-shadow: none;
+      border: none;
+      padding: 0;
       margin: 0 2px;
+      min-width: 20px;
+      min-height: 20px;
     }
+    row.combo > box.header > box.suffixes > box,
+    row.combo > box.header > box.suffixes > box:hover {
+      background: none;
+      background-color: transparent;
+    }
+    /* Dropdown popover: no gray frame around the list. */
+    row.combo popover.menu,
+    row.combo popover.menu.background {
+      background: none;
+      background-color: transparent;
+      box-shadow: none;
+      border: none;
+      padding: 0;
+    }
+    row.combo popover.menu > contents {
+      padding: 3px;
+      border-radius: 10px;
+    }
+    row.combo popover.menu > contents box,
+    row.combo popover.menu > contents scrolledwindow,
+    row.combo popover.menu > contents viewport,
+    row.combo popover.menu > contents listview {
+      background: none;
+      background-color: transparent;
+      padding: 0;
+    }
+    row.combo popover.menu > contents listview > row {
+      background-color: transparent;
+      min-height: 0;
+      padding: 0;
+      border-radius: 6px;
+    }
+    row.combo popover.menu > contents listview > row > box {
+      padding: 5px 10px;
+      min-height: 0;
+    }
+    row.combo popover.menu > contents listview > row:hover,
+    row.combo popover.menu > contents listview > row:selected {
+      background-color: alpha(currentColor, 0.1);
+    }
+    /* walltag-css-end */
     "#
 }

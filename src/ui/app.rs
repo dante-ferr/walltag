@@ -14,7 +14,7 @@ use gtk4::{
     Align, Box as GtkBox, Button, CssProvider, DropDown, Editable, EventControllerKey,
     FileDialog, GestureClick, ListBoxRow, Orientation, Overlay, Paned, PickFlags, Popover,
     PropagationPhase, Scale, Scrollbar, SpinButton, Switch, ToggleButton, Widget,
-    STYLE_PROVIDER_PRIORITY_APPLICATION,
+    STYLE_PROVIDER_PRIORITY_USER,
 };
 
 use crate::config::{ConfigPaths, MAX_SIDEBAR_WIDTH, MIN_SIDEBAR_WIDTH};
@@ -421,7 +421,8 @@ fn install_embedded_css(app: &Application) {
     gtk4::style_context_add_provider_for_display(
         &Display::default().expect("default display"),
         &provider,
-        STYLE_PROVIDER_PRIORITY_APPLICATION,
+        // USER priority so the dropdown and sidebar rules beat a global gtk.css theme.
+        STYLE_PROVIDER_PRIORITY_USER,
     );
     let _ = StyleManager::default();
     let _ = app;
