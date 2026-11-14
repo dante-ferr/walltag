@@ -119,8 +119,6 @@ impl Sidebar {
             .body_class("walltag-sidebar")
             .child(&anim_group)
             .build();
-        anim_overlay.wire_escape_to_close();
-
         let anim_btn = Button::builder()
             .icon_name("preferences-system-symbolic")
             .tooltip_text("awww animation settings")
@@ -452,9 +450,8 @@ fn build_search_section(
             folder_search.grab_focus();
         });
     }
-    folder_overlay.wire_escape_to_close();
-    // SearchEntry consumes Escape (stop-search) inside the dialog focus scope, so
-    // the window-level Esc handler never sees it. Close from that signal as well.
+    // SearchEntry can consume Escape (stop-search) inside the dialog focus scope.
+    // Closing from that signal covers the case where capture did not reach the sheet.
     folder_search.connect_stop_search({
         let overlay = folder_overlay.clone();
         move |_| {
@@ -612,7 +609,6 @@ fn build_gallery_section(
         .child(&group_list)
         .build();
     group_overlay.bind_trigger(&group_open);
-    group_overlay.wire_escape_to_close();
 
     let group_items = [
         (

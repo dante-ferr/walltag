@@ -24,7 +24,7 @@ use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryVi
 use crate::ui::gallery_scroll::wire_gallery_arrow_keys;
 use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
 use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
-use crate::ui::overlay::{close_focused_dialog, overlay_css};
+use crate::ui::overlay::{close_visible_dialog, is_dialog_dimming, overlay_css};
 use crate::ui::sidebar::Sidebar;
 use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
@@ -359,7 +359,8 @@ fn wire_clear_selection(window: &ApplicationWindow, grid: &MasonryGrid) {
         let grid = grid.clone();
         key.connect_key_pressed(move |_, keyval, _, _| {
             if keyval == gtk4::gdk::Key::Escape {
-                if close_focused_dialog(&window) {
+                // Close any open floating overlay even when focus never entered it.
+                if close_visible_dialog(&window) {
                     return gtk4::glib::Propagation::Stop;
                 }
                 clear_focus_and_selection(&window, &grid);
@@ -382,6 +383,12 @@ fn wire_clear_selection(window: &ApplicationWindow, grid: &MasonryGrid) {
             clear_focus_and_selection(&window, &grid);
             return;
         };
+        // Floating AdwDialog only closes on dimming click in bottom-sheet mode; do it
+        // here for floating overlays too (before is_interactive treats Dialog as a hit).
+        if is_dialog_dimming(&target) {
+            let _ = close_visible_dialog(&window);
+            return;
+        }
         if is_interactive(&target) {
             return;
         }
