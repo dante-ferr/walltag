@@ -179,9 +179,10 @@ pub enum ClickAction {
     Ignore,
 }
 
-/// Decides the effect of a click. The wallpaper is set only by a primary-button click on a
-/// tile while the edit batch is empty. Secondary click selects only the tile unless Shift or
-/// Control is held, in which case the tile is toggled in the existing batch.
+/// Decides the effect of a click. A primary-button click on a tile applies the wallpaper unless
+/// Shift or Control is held, in which case the tile is toggled in the edit batch (including when
+/// the batch is empty). Secondary click selects only the tile unless Shift or Control is held, in
+/// which case the tile is toggled in the batch.
 pub fn click_action(
     button: u32,
     on_tile: bool,
@@ -191,8 +192,8 @@ pub fn click_action(
     match (button, on_tile) {
         (BUTTON_SECONDARY, true) if extend_selection => ClickAction::Toggle,
         (BUTTON_SECONDARY, true) => ClickAction::SelectOnly,
-        (BUTTON_PRIMARY, true) if batch_empty => ClickAction::Activate,
-        (BUTTON_PRIMARY, true) => ClickAction::Toggle,
+        (BUTTON_PRIMARY, true) if extend_selection => ClickAction::Toggle,
+        (BUTTON_PRIMARY, true) => ClickAction::Activate,
         (BUTTON_PRIMARY, false) if !batch_empty => ClickAction::ClearSelection,
         _ => ClickAction::Ignore,
     }
@@ -205,7 +206,7 @@ struct Drag {
     current: (f64, f64),
     button: u32,
     active: bool,
-    /// Shift or Control held at press time (secondary click adds to the batch).
+    /// Shift or Control held at press time (toggle the batch instead of apply / select-only).
     extend_selection: bool,
 }
 
@@ -1770,7 +1771,9 @@ mod tests {
     #[test]
     fn wallpaper_applies_only_on_primary_click_with_empty_batch() {
         assert_eq!(click_action(1, true, true, false), ClickAction::Activate);
-        assert_eq!(click_action(1, true, false, false), ClickAction::Toggle);
+        assert_eq!(click_action(1, true, true, true), ClickAction::Toggle);
+        assert_eq!(click_action(1, true, false, false), ClickAction::Activate);
+        assert_eq!(click_action(1, true, false, true), ClickAction::Toggle);
         assert_eq!(click_action(3, true, true, false), ClickAction::SelectOnly);
         assert_eq!(click_action(3, true, false, false), ClickAction::SelectOnly);
         assert_eq!(click_action(3, true, false, true), ClickAction::Toggle);
