@@ -71,9 +71,19 @@ impl Sidebar {
                 .unwrap_or(0) as u32,
         );
 
+        let post_command_row = EntryRow::builder()
+            .title("Post command")
+            .tooltip_text(
+                "Shell command after setting a wallpaper. Use $wallpaper and $monitor. Leave empty to skip.",
+            )
+            .show_apply_button(true)
+            .build();
+        post_command_row.set_text(&config.borrow().post_command);
+
         let output_group = PreferencesGroup::builder().title("Output").build();
         output_group.add(&monitor_row);
         output_group.add(&backend_row);
+        output_group.add(&post_command_row);
 
         let gallery_group =
             build_gallery_section(config.clone(), gallery.clone(), model.clone(), &grid);
@@ -201,6 +211,13 @@ impl Sidebar {
                 }
                 reveal_widget(&anim_btn, kind == BackendKind::Awww);
                 update(&config, |cfg| cfg.backend = kind);
+            });
+        }
+        {
+            let config = config.clone();
+            post_command_row.connect_apply(move |row| {
+                let text = row.text().to_string();
+                update(&config, |cfg| cfg.post_command = text);
             });
         }
         {
@@ -574,9 +591,8 @@ fn build_search_section(
     {
         let model = model.clone();
         random.connect_clicked(move |_| match set_random_wallpaper(&model) {
-            Ok(Some(key)) => tracing::info!("Random wallpaper: {key}"),
-            Ok(None) => tracing::warn!("No wallpapers match the current filters"),
-            Err(err) => tracing::error!("Failed to set random wallpaper: {err:#}"),
+            Some(key) => tracing::info!("Random wallpaper: {key}"),
+            None => tracing::warn!("No wallpapers match the current filters"),
         });
     }
 

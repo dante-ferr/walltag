@@ -524,7 +524,9 @@ fn refresh_tooltips(
 }
 
 /// Applies a random wallpaper from the currently filtered set (ignoring section headers).
-pub fn set_random_wallpaper(model: &GalleryModel) -> anyhow::Result<Option<String>> {
+///
+/// Selection is synchronous; the backend call and `post_command` run off the UI thread.
+pub fn set_random_wallpaper(model: &GalleryModel) -> Option<String> {
     let metadata = model.metadata();
     let metadata = metadata.borrow();
     let filter = model.filter.borrow().clone();
@@ -544,7 +546,7 @@ pub fn set_random_wallpaper(model: &GalleryModel) -> anyhow::Result<Option<Strin
         })
         .collect();
     if candidates.is_empty() {
-        return Ok(None);
+        return None;
     }
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -553,9 +555,8 @@ pub fn set_random_wallpaper(model: &GalleryModel) -> anyhow::Result<Option<Strin
     let entry = candidates[seed % candidates.len()].clone();
     let cfg = model.config().borrow().clone();
     let options = ApplyOptions::from_config(&cfg);
-    crate::backends::apply_wallpaper(cfg.backend, &entry.absolute, &options)?;
-    Cli::persist_last_wallpaper(&cfg, &entry.absolute)?;
-    Ok(Some(entry.relative_key))
+    apply_wallpaper_async(cfg, entry.absolute.clone(), options, entry.relative_key.clone());
+    Some(entry.relative_key)
 }
 
 pub fn wire_activate(grid: &MasonryGrid, model: &GalleryModel) {
@@ -573,21 +574,41 @@ pub fn wire_activate(grid: &MasonryGrid, model: &GalleryModel) {
         else {
             return;
         };
-        let cfg = config.borrow();
+        let cfg = config.borrow().clone();
         let options = ApplyOptions::from_config(&cfg);
-        if let Err(err) = crate::backends::apply_wallpaper(cfg.backend, &entry.absolute, &options) {
-            tracing::error!("Failed to set wallpaper: {err:#}");
-            return;
+        apply_wallpaper_async(cfg, entry.absolute, options, entry.relative_key);
+    });
+}
+
+/// Runs the wallpaper backend, `post_command`, and state persist off the GTK main thread.
+fn apply_wallpaper_async(
+    cfg: AppConfig,
+    image: std::path::PathBuf,
+    options: ApplyOptions,
+    relative_key: String,
+) {
+    let backend = cfg.backend;
+    let monitor = options
+        .monitor
+        .clone()
+        .unwrap_or_else(|| "all monitors".into());
+    glib::spawn_future_local(async move {
+        let result = gio::spawn_blocking(move || {
+            crate::backends::apply_wallpaper(backend, &image, &options)?;
+            Cli::persist_last_wallpaper(&cfg, &image)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => tracing::info!(
+                "Set wallpaper via {} on {}: {}",
+                backend.as_str(),
+                monitor,
+                relative_key
+            ),
+            Ok(Err(err)) => tracing::error!("Failed to set wallpaper: {err:#}"),
+            Err(_) => tracing::error!("Wallpaper apply task was cancelled"),
         }
-        if let Err(err) = Cli::persist_last_wallpaper(&cfg, &entry.absolute) {
-            tracing::error!("Failed to save wallpaper state: {err:#}");
-        }
-        tracing::info!(
-            "Set wallpaper via {} on {}: {}",
-            cfg.backend.as_str(),
-            options.monitor.as_deref().unwrap_or("all monitors"),
-            entry.relative_key
-        );
     });
 }
 
