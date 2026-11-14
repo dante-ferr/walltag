@@ -74,16 +74,21 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     let toast_overlay = ToastOverlay::new();
 
     let sidebar = Sidebar::new(config.clone(), gallery.clone(), model.clone());
-    // The sidebar sits in a `Paned` so the user can drag the divider to resize it.
     sidebar.widget.set_size_request(MIN_SIDEBAR_WIDTH, -1);
+    let sidebar_visible = config.borrow().sidebar_visible;
     let split = Paned::builder()
         .orientation(Orientation::Horizontal)
         .start_child(&sidebar.widget)
         .resize_start_child(false)
-        .shrink_start_child(false)
+        // Open sidebar: GtkPaned enforces the size request. Hidden: allow collapse to 0.
+        .shrink_start_child(!sidebar_visible)
         .resize_end_child(true)
-        .shrink_end_child(false)
-        .position(config.borrow().sidebar_width)
+        .shrink_end_child(true)
+        .position(if sidebar_visible {
+            config.borrow().sidebar_width
+        } else {
+            0
+        })
         .build();
     {
         // Keep the width in memory while dragging and write it once the drag settles.
@@ -91,11 +96,23 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
         let sidebar_widget = sidebar.widget.clone();
         let pending: Rc<RefCell<Option<gtk4::glib::SourceId>>> = Rc::new(RefCell::new(None));
         split.connect_position_notify(move |split| {
-            // A hidden sidebar reports a collapsed position; do not store it.
             if !sidebar_widget.is_visible() {
                 return;
             }
-            let width = split.position().clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+            let raw = split.position();
+            let width = raw.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+            if raw != width {
+                if !split.shrinks_start_child() {
+                    let split = split.clone();
+                    gtk4::glib::idle_add_local_once(move || {
+                        if split.shrinks_start_child() || split.position() == width {
+                            return;
+                        }
+                        split.set_position(width);
+                    });
+                }
+                return;
+            }
             if config.borrow().sidebar_width == width {
                 return;
             }
@@ -137,8 +154,20 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
         .build();
     {
         let config = config.clone();
+        let split = split.clone();
         sidebar.widget.connect_notify_local(Some("visible"), move |widget, _| {
             let visible = widget.is_visible();
+            split.set_shrink_start_child(!visible);
+            if visible {
+                split.set_position(
+                    config
+                        .borrow()
+                        .sidebar_width
+                        .clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH),
+                );
+            } else {
+                split.set_position(0);
+            }
             if config.borrow().sidebar_visible == visible {
                 return;
             }

@@ -525,7 +525,9 @@ mod imp {
 
         fn measure(&self, orientation: Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             match orientation {
-                Orientation::Horizontal => (MIN_WIDGET_WIDTH, MIN_WIDGET_WIDTH, -1, -1),
+                // Minimum is 0 so a narrow window cannot force this width onto the
+                // sidebar. Natural width stays at the comfortable column size.
+                Orientation::Horizontal => (0, MIN_WIDGET_WIDTH, -1, -1),
                 _ => {
                     let width = if for_size > 0 {
                         for_size
