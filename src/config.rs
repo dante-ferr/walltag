@@ -143,6 +143,21 @@ pub struct AppConfig {
     /// How the gallery orders groups and the wallpapers inside them.
     #[serde(default)]
     pub sort_by: SortBy,
+    /// Filename search text in the Browse section.
+    #[serde(default)]
+    pub search_query: String,
+    /// Tag filter (`None` = all tags).
+    #[serde(default)]
+    pub filter_tag: Option<String>,
+    /// Folder filter as `parent_relative` (`None` = all folders, `Some("")` = root).
+    #[serde(default)]
+    pub filter_folder: Option<String>,
+    /// Gallery zoom factor (1.0 = 100%).
+    #[serde(default = "default_zoom")]
+    pub zoom: f32,
+    /// Whether the sidebar is visible.
+    #[serde(default = "default_true")]
+    pub sidebar_visible: bool,
 }
 
 /// Ordering for groups (section headers) and for the wallpapers inside each group.
@@ -237,6 +252,14 @@ fn default_transition_secs() -> f32 {
     1.0
 }
 
+fn default_zoom() -> f32 {
+    1.0
+}
+
+fn default_true() -> bool {
+    true
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -250,6 +273,11 @@ impl Default for AppConfig {
             show_filenames: false,
             group_by: GroupBy::default(),
             sort_by: SortBy::default(),
+            search_query: String::new(),
+            filter_tag: None,
+            filter_folder: None,
+            zoom: default_zoom(),
+            sidebar_visible: true,
         }
     }
 }
@@ -261,6 +289,7 @@ impl AppConfig {
             self.custom_css = Some(expand_home(css)?);
         }
         self.sidebar_width = self.sidebar_width.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
+        self.zoom = self.zoom.clamp(0.4, 3.0);
         Ok(())
     }
 
@@ -349,6 +378,11 @@ mod tests {
         assert_eq!(cfg.sidebar_width, 300);
         assert!(!cfg.show_filenames);
         assert_eq!(cfg.sort_by, SortBy::NameAsc);
+        assert!(cfg.search_query.is_empty());
+        assert_eq!(cfg.filter_tag, None);
+        assert_eq!(cfg.filter_folder, None);
+        assert_eq!(cfg.zoom, 1.0);
+        assert!(cfg.sidebar_visible);
     }
 
     #[test]

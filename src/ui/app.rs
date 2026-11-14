@@ -11,7 +11,7 @@ use gtk4::gdk::Display;
 use gtk4::gio;
 use gtk4::prelude::{ButtonExt, GtkWindowExt};
 use gtk4::{
-    Align, Box as GtkBox, Button, CssProvider, DropDown, Editable, EventControllerKey,
+    Align, Box as GtkBox, Button, CheckButton, CssProvider, DropDown, Editable, EventControllerKey,
     FileDialog, GestureClick, ListBoxRow, Orientation, Overlay, Paned, PickFlags, Popover,
     PropagationPhase, Scale, Scrollbar, SpinButton, Switch, ToggleButton, Widget,
     STYLE_PROVIDER_PRIORITY_USER,
@@ -66,8 +66,10 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     };
 
     let gallery = Rc::new(GalleryView::new(model.clone()));
-    gallery.reload_from_scan(entries);
+    gallery.grid.set_zoom(config.borrow().zoom);
+    gallery.reload_from_scan(entries, false);
     wire_activate(&gallery.grid, &model);
+    wire_persist_zoom(config.clone(), &gallery.grid);
 
     let toast_overlay = ToastOverlay::new();
 
@@ -126,12 +128,26 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
         .margin_start(18)
         .css_classes(["osd", "circular"])
         .build();
+    sidebar.widget.set_visible(config.borrow().sidebar_visible);
     sidebar
         .widget
         .bind_property("visible", &sidebar_toggle, "active")
         .bidirectional()
         .sync_create()
         .build();
+    {
+        let config = config.clone();
+        sidebar.widget.connect_notify_local(Some("visible"), move |widget, _| {
+            let visible = widget.is_visible();
+            if config.borrow().sidebar_visible == visible {
+                return;
+            }
+            config.borrow_mut().sidebar_visible = visible;
+            if let Err(err) = ConfigPaths::save(&config.borrow()) {
+                tracing::error!("Failed to save config: {err:#}");
+            }
+        });
+    }
     let content = Overlay::new();
     content.set_child(Some(&gallery.root));
     content.add_overlay(&sidebar_toggle);
@@ -256,25 +272,27 @@ fn wire_zoom_actions(app: &Application, window: &ApplicationWindow, grid: &Mason
     }
 }
 
-/// Clears every selection in the app. Add any new selectable state here so Esc and
-/// blank-space clicks keep covering it.
-fn clear_all_selection(grid: &MasonryGrid) {
+/// Clears selection and drops keyboard focus from inputs. Add any new selectable state
+/// here so Esc and blank-space clicks keep covering it.
+fn clear_focus_and_selection(window: &ApplicationWindow, grid: &MasonryGrid) {
+    GtkWindowExt::set_focus(window, None::<&Widget>);
     grid.clear_selection();
 }
 
-/// App-wide selection clearing: Esc anywhere in the window, and a press on blank space.
+/// App-wide clear: Esc anywhere, and a press on blank space.
 ///
 /// Both gestures run in the capture phase and never claim the event, so every widget
-/// still receives it. The gallery grid is skipped for presses because it already clears
-/// on a blank press and handles tile clicks itself.
+/// still receives it. Tile clicks inside the gallery still go to the masonry grid for
+/// selection/activate; this path only clears focus (and selection outside the grid).
 fn wire_clear_selection(window: &ApplicationWindow, grid: &MasonryGrid) {
     let key = EventControllerKey::new();
     key.set_propagation_phase(PropagationPhase::Capture);
     {
+        let window = window.clone();
         let grid = grid.clone();
         key.connect_key_pressed(move |_, keyval, _, _| {
             if keyval == gtk4::gdk::Key::Escape {
-                clear_all_selection(&grid);
+                clear_focus_and_selection(&window, &grid);
             }
             gtk4::glib::Propagation::Proceed
         });
@@ -291,12 +309,19 @@ fn wire_clear_selection(window: &ApplicationWindow, grid: &MasonryGrid) {
             return;
         };
         let Some(target) = window.pick(x, y, PickFlags::DEFAULT) else {
+            clear_focus_and_selection(&window, &grid);
             return;
         };
-        if is_inside(&target, grid.upcast_ref()) || is_interactive(&target) {
+        if is_interactive(&target) {
             return;
         }
-        clear_all_selection(&grid);
+        // Always drop focus when clicking outside controls (including gallery tiles).
+        GtkWindowExt::set_focus(&window, None::<&Widget>);
+        // Selection clear for gallery blanks is handled by the masonry grid; elsewhere
+        // clear the edit batch here.
+        if !is_inside(&target, grid.upcast_ref()) {
+            grid.clear_selection();
+        }
     });
     window.add_controller(click);
 }
@@ -316,6 +341,7 @@ fn is_interactive(target: &Widget) -> bool {
     while let Some(w) = current {
         let control = w.is::<Button>()
             || w.is::<Editable>()
+            || w.is::<CheckButton>()
             || w.is::<Scrollbar>()
             || w.is::<Scale>()
             || w.is::<Switch>()
@@ -405,7 +431,7 @@ fn apply_wallpaper_root(
         Vec::new()
     });
 
-    gallery.reload_from_scan(entries);
+    gallery.reload_from_scan(entries, true);
     gallery.show_empty_banner(&config.borrow());
 
     tracing::info!(
@@ -413,6 +439,33 @@ fn apply_wallpaper_root(
         config.borrow().wallpaper_root.display()
     );
     Ok(())
+}
+
+/// Persists gallery zoom a short time after the last change so rapid Ctrl+wheel
+/// bursts do not rewrite config.json on every step.
+fn wire_persist_zoom(config: Rc<RefCell<AppConfig>>, grid: &MasonryGrid) {
+    let pending: Rc<RefCell<Option<gtk4::glib::SourceId>>> = Rc::new(RefCell::new(None));
+    grid.connect_zoom_changed(move |zoom| {
+        if (config.borrow().zoom - zoom).abs() < f32::EPSILON {
+            return;
+        }
+        config.borrow_mut().zoom = zoom;
+        if let Some(id) = pending.borrow_mut().take() {
+            id.remove();
+        }
+        let config = config.clone();
+        let slot = pending.clone();
+        let id = gtk4::glib::timeout_add_local_once(
+            std::time::Duration::from_millis(400),
+            move || {
+                slot.borrow_mut().take();
+                if let Err(err) = ConfigPaths::save(&config.borrow()) {
+                    tracing::error!("Failed to save config: {err:#}");
+                }
+            },
+        );
+        *pending.borrow_mut() = Some(id);
+    });
 }
 
 fn install_embedded_css(app: &Application) {

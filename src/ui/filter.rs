@@ -16,7 +16,7 @@ pub const ROOT_FOLDER_LABEL: &str = "Root";
 /// Label for wallpapers with no tags when grouping by tag.
 pub const UNTAGGED_LABEL: &str = "Untagged";
 
-/// Active search / filter / group / sort state (tag/folder filters are session-only).
+/// Active search / filter / group / sort state (persisted via `AppConfig`).
 #[derive(Debug, Clone, Default)]
 pub struct GalleryFilter {
     pub query: String,

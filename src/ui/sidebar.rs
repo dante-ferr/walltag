@@ -438,6 +438,7 @@ fn build_search_section(
         let model = model.clone();
         let tag_options = tag_options.clone();
         let rebuilding = rebuilding.clone();
+        let config = config.clone();
         tag_row.connect_selected_notify(move |row| {
             if rebuilding.get() {
                 return;
@@ -447,7 +448,8 @@ fn build_search_section(
                 .get(row.selected() as usize)
                 .cloned()
                 .flatten();
-            model.filter().borrow_mut().tag = choice;
+            model.filter().borrow_mut().tag = choice.clone();
+            update(&config, |cfg| cfg.filter_tag = choice);
             gallery.refresh(true);
         });
     }
@@ -456,6 +458,7 @@ fn build_search_section(
         let model = model.clone();
         let folder_options = folder_options.clone();
         let rebuilding = rebuilding.clone();
+        let config = config.clone();
         folder_row.connect_selected_notify(move |row| {
             if rebuilding.get() {
                 return;
@@ -465,7 +468,8 @@ fn build_search_section(
                 .get(row.selected() as usize)
                 .cloned()
                 .flatten();
-            model.filter().borrow_mut().folder = choice;
+            model.filter().borrow_mut().folder = choice.clone();
+            update(&config, |cfg| cfg.filter_folder = choice);
             gallery.refresh(true);
         });
     }

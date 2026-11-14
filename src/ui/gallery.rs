@@ -30,19 +30,21 @@ pub struct GalleryModel {
 impl GalleryModel {
     /// `config` is shared with the rest of the UI so sidebar changes apply immediately.
     pub fn new(config: Rc<RefCell<AppConfig>>, metadata: MetadataStore) -> Self {
-        let (group_by, sort_by) = {
+        let filter = {
             let cfg = config.borrow();
-            (cfg.group_by, cfg.sort_by)
+            GalleryFilter {
+                query: cfg.search_query.clone(),
+                group_by: cfg.group_by,
+                sort_by: cfg.sort_by,
+                tag: cfg.filter_tag.clone(),
+                folder: cfg.filter_folder.clone(),
+            }
         };
         Self {
             entries: Rc::new(RefCell::new(Vec::new())),
             metadata: Rc::new(RefCell::new(metadata)),
             config,
-            filter: Rc::new(RefCell::new(GalleryFilter {
-                group_by,
-                sort_by,
-                ..Default::default()
-            })),
+            filter: Rc::new(RefCell::new(filter)),
             sort_data: Rc::new(RefCell::new(SortData::default())),
         }
     }
@@ -191,8 +193,24 @@ impl GalleryView {
         let model = self.model.clone();
         let dimensions = self.dimensions.clone();
         let on_repopulated = self.on_repopulated.clone();
+        // Restore the saved query without firing a redundant first refresh.
+        let saved = model.filter.borrow().query.clone();
+        if !saved.is_empty() {
+            self.search.set_text(&saved);
+        }
         self.search.connect_search_changed(move |entry| {
-            model.filter.borrow_mut().query = entry.text().to_string();
+            let query = entry.text().to_string();
+            model.filter.borrow_mut().query = query.clone();
+            {
+                let config = model.config();
+                let mut cfg = config.borrow_mut();
+                if cfg.search_query != query {
+                    cfg.search_query = query;
+                    if let Err(err) = crate::ConfigPaths::save(&cfg) {
+                        tracing::error!("Failed to save config: {err:#}");
+                    }
+                }
+            }
             populate(&grid, &model, &dimensions.borrow(), true);
             for cb in on_repopulated.borrow().iter() {
                 cb();
@@ -205,7 +223,9 @@ impl GalleryView {
     /// Saved sizes are applied up front so a warm cache lays out with the real aspect
     /// ratios. Stats, cache misses, and hue samples finish on a worker and update the
     /// grid only when the order or the sizes actually change.
-    pub fn reload_from_scan(&self, entries: Vec<WallpaperEntry>) {
+    /// Replaces gallery contents. When `reset_browse` is true (new wallpaper root), clears
+    /// and persists the search/tag/folder filters; otherwise keeps the saved Browse state.
+    pub fn reload_from_scan(&self, entries: Vec<WallpaperEntry>, reset_browse: bool) {
         self.generation.set(self.generation.get() + 1);
         let generation = self.generation.get();
 
@@ -214,10 +234,25 @@ impl GalleryView {
             .iter()
             .map(|e| (e.relative_key.clone(), e.absolute.clone()))
             .collect();
-        self.search.set_text("");
-        self.model.filter.borrow_mut().query.clear();
-        self.model.filter.borrow_mut().tag = None;
-        self.model.filter.borrow_mut().folder = None;
+        if reset_browse {
+            self.search.set_text("");
+            {
+                let mut filter = self.model.filter.borrow_mut();
+                filter.query.clear();
+                filter.tag = None;
+                filter.folder = None;
+            }
+            {
+                let config = self.model.config();
+                let mut cfg = config.borrow_mut();
+                cfg.search_query.clear();
+                cfg.filter_tag = None;
+                cfg.filter_folder = None;
+                if let Err(err) = crate::ConfigPaths::save(&cfg) {
+                    tracing::error!("Failed to save config: {err:#}");
+                }
+            }
+        }
         self.model.set_entries(entries);
         *self.dimensions.borrow_mut() = DimensionCache::load(&root).unvalidated();
         populate(&self.grid, &self.model, &self.dimensions.borrow(), true);
