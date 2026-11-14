@@ -22,6 +22,16 @@
       after each successful set.
     </p>
   </description>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/dante-ferr/walltag/v0.1.1/assets/screenshots/screenshot-1.png</image>
+      <caption>Browse and tag wallpapers in the masonry gallery</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/dante-ferr/walltag/v0.1.1/assets/screenshots/screenshot-2.png</image>
+      <caption>Gallery view with the sidebar hidden</caption>
+    </screenshot>
+  </screenshots>
   <launchable type="desktop-id">io.github.dante_ferr.Walltag.desktop</launchable>
   <provides>
     <binary>walltag</binary>
@@ -47,6 +57,11 @@
     <keyword>gtk</keyword>
   </keywords>
   <releases>
+    <release version="0.1.1" date="2026-11-14">
+      <description>
+        <p>AppStream screenshots, GNOME 51 Flatpak runtime, and host-daemon auto-start for swww/awww.</p>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-11-14">
       <description>
         <p>Initial release: masonry gallery, tags, swww/awww backends, and restore.</p>

@@ -1,6 +1,6 @@
 [package]
 name = "walltag"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Minimalist wallpaper manager and visual gallery for Linux/Wayland"
 license = "MIT"

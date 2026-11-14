@@ -1,6 +1,6 @@
 # Maintainer: Dante Ferreira <https://github.com/dante-ferr>
 pkgname=walltag
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc="Minimalist wallpaper manager and visual gallery for Linux/Wayland"
 arch=('x86_64' 'aarch64')
