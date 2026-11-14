@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::process::Command;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -30,6 +31,10 @@ use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
 
 const APP_ID: &str = "com.walltag.Walltag";
+
+/// Initial main-window size, in logical pixels. Hyprland is asked for the same size after floating.
+const DEFAULT_WINDOW_WIDTH: i32 = 1080;
+const DEFAULT_WINDOW_HEIGHT: i32 = 960;
 
 pub fn launch(config: AppConfig) -> Result<()> {
     let app = Application::builder().application_id(APP_ID).build();
@@ -221,10 +226,12 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
     let window = ApplicationWindow::builder()
         .application(app)
         .title("Walltag")
-        .default_width(1080)
-        .default_height(960)
+        .default_width(DEFAULT_WINDOW_WIDTH)
+        .default_height(DEFAULT_WINDOW_HEIGHT)
+        .maximized(false)
         .content(&toast_overlay)
         .build();
+    wire_startup_window();
 
     gallery.show_empty_banner(&config.borrow());
 
@@ -254,6 +261,68 @@ fn build_ui(app: &Application, config: Rc<RefCell<AppConfig>>) -> Result<()> {
 
     window.present();
     Ok(())
+}
+
+/// On Hyprland, float the window once it is mapped, then size and center it.
+///
+/// Hyprland 0.57 evaluates `hyprctl dispatch` as Lua. The old `setfloating` form is ignored,
+/// so the window stays in the tiling grid.
+fn wire_startup_window() {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        return;
+    }
+    schedule_hyprland_float(0);
+}
+
+fn schedule_hyprland_float(attempt: u8) {
+    if float_hyprland_window() || attempt >= 40 {
+        return;
+    }
+    gtk4::glib::timeout_add_local_once(std::time::Duration::from_millis(50), move || {
+        schedule_hyprland_float(attempt + 1);
+    });
+}
+
+/// Returns true once this process's window is found and the float request is sent.
+fn float_hyprland_window() -> bool {
+    let Ok(output) = Command::new("hyprctl").args(["clients", "-j"]).output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(clients) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+        return false;
+    };
+    let Some(clients) = clients.as_array() else {
+        return false;
+    };
+    let pid = u64::from(std::process::id());
+    let Some(address) = clients.iter().find_map(|client| {
+        if client.get("pid")?.as_u64() != Some(pid) {
+            return None;
+        }
+        client.get("address")?.as_str().map(str::to_owned)
+    }) else {
+        return false;
+    };
+
+    let batch = format!(
+        "dispatch hl.dsp.window.float({{ action = \"set\", window = \"address:{address}\" }}); \
+         dispatch hl.dsp.window.resize({{ window = \"address:{address}\", x = {DEFAULT_WINDOW_WIDTH}, y = {DEFAULT_WINDOW_HEIGHT} }}); \
+         dispatch hl.dsp.window.center({{ window = \"address:{address}\" }})"
+    );
+    match Command::new("hyprctl").args(["--batch", &batch]).status() {
+        Ok(status) if status.success() => true,
+        Ok(status) => {
+            tracing::warn!("hyprctl did not float the window (status {status})");
+            true
+        }
+        Err(err) => {
+            tracing::warn!("failed to run hyprctl: {err}");
+            true
+        }
+    }
 }
 
 /// Keeps an open sidebar at or above the scaled minimum. A hidden sidebar may shrink to 0.

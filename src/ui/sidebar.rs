@@ -1063,6 +1063,7 @@ fn monitor_entries(mut connected: Vec<String>, saved: Option<&str>) -> Vec<Optio
 /// Index 0 is the "all / none" row. It is on exactly when the returned indexes are
 /// empty. Every other row can be on at the same time. `active` is the state after the
 /// click, and `toggled` is the row that changed.
+#[cfg(test)]
 fn exclusive_after_toggle(active: &[bool], toggled: usize) -> Vec<usize> {
     if active.is_empty() || toggled >= active.len() {
         return Vec::new();
