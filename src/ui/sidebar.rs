@@ -10,7 +10,7 @@ use gtk4::{
     RevealerTransitionType, ScrolledWindow, SearchEntry, StringList, Widget,
 };
 use libadwaita::prelude::*;
-use libadwaita::{ActionRow, ComboRow, EntryRow, ExpanderRow, PreferencesGroup, SpinRow};
+use libadwaita::{ActionRow, ComboRow, EntryRow, PreferencesGroup, SpinRow};
 
 use crate::config::{AppConfig, AwwwTransitionKind, BackendKind, ConfigPaths, GroupBy, SortBy};
 use crate::metadata::parse_tag_input;
@@ -413,13 +413,52 @@ fn build_search_section(
     search_row.add_suffix(&search);
     group.add(&search_row);
 
-    let folder_row = ExpanderRow::new();
-    folder_row.set_title("Folder");
-    folder_row.set_expanded(true);
-    folder_row.set_tooltip_text(Some(
-        "Show wallpapers in the checked folders. All folders shows every folder.",
-    ));
+    let folder_tooltip = "Show wallpapers in the checked folders. All folders shows every folder.";
+    let (folder_row, folder_open) = checklist_trigger_row(
+        "Folder",
+        folder_tooltip,
+        &folder_filter_summary(&model.filter().borrow().folders),
+    );
     group.add(&folder_row);
+
+    let folder_search = SearchEntry::new();
+    folder_search.set_placeholder_text(Some("Search folders…"));
+    folder_search.set_hexpand(true);
+    folder_search.set_tooltip_text(Some("Filter the folder checklist"));
+
+    let folder_list = PreferencesGroup::builder().build();
+    let folder_scroll = ScrolledWindow::builder()
+        .hscrollbar_policy(PolicyType::Never)
+        .vscrollbar_policy(PolicyType::Automatic)
+        .propagate_natural_height(true)
+        .max_content_height(360)
+        .vexpand(true)
+        .child(&folder_list)
+        .build();
+    let folder_body = Box::new(Orientation::Vertical, 8);
+    folder_body.append(&folder_search);
+    folder_body.append(&folder_scroll);
+    let folder_overlay = FloatingOverlay::builder("Folder")
+        .content_width(300)
+        .body_class("walltag-sidebar")
+        .child(&folder_body)
+        .build();
+    {
+        let overlay = folder_overlay.clone();
+        let folder_search = folder_search.clone();
+        folder_open.connect_clicked(move |btn| {
+            overlay.present(btn);
+            folder_search.grab_focus();
+        });
+    }
+    folder_overlay.dialog().connect_closed({
+        let folder_search = folder_search.clone();
+        move |_| {
+            if !folder_search.text().is_empty() {
+                folder_search.set_text("");
+            }
+        }
+    });
 
     let random = Button::builder()
         .label("Random")
@@ -437,13 +476,16 @@ fn build_search_section(
 
     let folder_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
     let rebuilding = Rc::new(Cell::new(false));
-    // Available folders plus the checked ids. Search refreshes the gallery often; the
-    // checklist is rebuilt only when this pair changes.
-    let shown: Rc<RefCell<Option<(Vec<String>, Vec<String>)>>> = Rc::new(RefCell::new(None));
+    // Folders, checked ids, and search text. Gallery refreshes often; rebuild only when
+    // this triple changes.
+    let shown: Rc<RefCell<Option<(Vec<String>, Vec<String>, String)>>> =
+        Rc::new(RefCell::new(None));
 
     let rebuild_filters: Rc<dyn Fn()> = {
         let folder_row = folder_row.clone();
+        let folder_list = folder_list.clone();
         let folder_rows = folder_rows.clone();
+        let folder_search = folder_search.clone();
         let model = model.clone();
         let gallery = gallery.clone();
         let config = config.clone();
@@ -453,6 +495,7 @@ fn build_search_section(
             let entries = model.entries().borrow().clone();
             let current = model.filter().borrow().folders.clone();
             let folders = collect_folders(&entries);
+            let query = folder_search.text().to_string();
             // Drop folders that the latest scan no longer contains. An empty scan keeps
             // the saved filter so a failed scan does not wipe it.
             let pruned = if folders.is_empty() {
@@ -471,13 +514,14 @@ fn build_search_section(
             }
             let selected = if pruned != current { pruned } else { current };
             folder_row.set_subtitle(&folder_filter_summary(&selected));
-            let signature = (folders.clone(), selected.clone());
+            let signature = (folders.clone(), selected.clone(), query.clone());
             if shown.borrow().as_ref() == Some(&signature) {
                 return;
             }
             *shown.borrow_mut() = Some(signature);
             let items: Vec<(String, String)> = folders
                 .iter()
+                .filter(|folder| folder_matches_query(folder, &query))
                 .map(|folder| (folder.clone(), folder_label(folder)))
                 .collect();
             let on_change: Rc<dyn Fn(Vec<String>)> = Rc::new({
@@ -492,7 +536,7 @@ fn build_search_section(
                         return;
                     }
                     model.filter().borrow_mut().folders = selected.clone();
-                    if let Some((_, picked)) = shown.borrow_mut().as_mut() {
+                    if let Some((_, picked, _)) = shown.borrow_mut().as_mut() {
                         *picked = selected.clone();
                     }
                     update(&config, |cfg| cfg.filter_folders = selected);
@@ -500,7 +544,7 @@ fn build_search_section(
                 }
             });
             install_exclusive_checks(
-                &folder_row,
+                &folder_list,
                 &folder_rows,
                 ALL_FOLDERS_LABEL,
                 &items,
@@ -514,6 +558,10 @@ fn build_search_section(
     gallery.connect_repopulated({
         let rebuild_filters = rebuild_filters.clone();
         move || rebuild_filters()
+    });
+    folder_search.connect_search_changed({
+        let rebuild_filters = rebuild_filters.clone();
+        move |_| rebuild_filters()
     });
     {
         let model = model.clone();
@@ -536,15 +584,24 @@ fn build_gallery_section(
 ) -> PreferencesGroup {
     let group = PreferencesGroup::builder().title("Gallery").build();
 
-    let group_row = ExpanderRow::new();
-    group_row.set_title("Group by");
-    group_row.set_expanded(true);
-    group_row.set_tooltip_text(Some(
-        "Section headers. Check folder, tag, or both. None leaves the gallery flat.",
-    ));
-    group.add(&group_row);
     let selected_kinds = GroupBy::normalize(&config.borrow().group_by);
-    group_row.set_subtitle(&group_by_summary(&selected_kinds));
+    let group_tooltip =
+        "Section headers. Check folder, tag, or both. None leaves the gallery flat.";
+    let (group_row, group_open) = checklist_trigger_row(
+        "Group by",
+        group_tooltip,
+        &group_by_summary(&selected_kinds),
+    );
+    group.add(&group_row);
+
+    let group_list = PreferencesGroup::builder().build();
+    let group_overlay = FloatingOverlay::builder("Group by")
+        .content_width(300)
+        .body_class("walltag-sidebar")
+        .child(&group_list)
+        .build();
+    group_overlay.bind_trigger(&group_open);
+
     let group_items = [
         (
             GroupBy::Folder.as_str().to_owned(),
@@ -562,7 +619,7 @@ fn build_gallery_section(
     let group_rows: Rc<RefCell<Vec<ActionRow>>> = Rc::new(RefCell::new(Vec::new()));
     let group_rebuilding = Rc::new(Cell::new(false));
     install_exclusive_checks(
-        &group_row,
+        &group_list,
         &group_rows,
         GroupBy::None.label(),
         &group_items,
@@ -740,6 +797,7 @@ fn build_edit_section(gallery: Rc<GalleryView>, grid: MasonryGrid, model: Galler
         .title("Shared tags")
         .description("Tags on every selected wallpaper. Remove deletes them from the selection.")
         .build();
+    shared_group.add_css_class("walltag-shared-tags");
     let shared_revealer = Revealer::builder()
         .transition_type(RevealerTransitionType::SlideDown)
         .transition_duration(SIDEBAR_REVEAL_MS as u32)
@@ -1006,23 +1064,76 @@ fn exclusive_after_toggle(active: &[bool], toggled: usize) -> Vec<usize> {
         .collect()
 }
 
-/// Writes `keep` back onto the checks. Index 0 is the exclusive row.
-fn apply_exclusive_toggle(checks: &[(Option<String>, CheckButton)], toggled: usize) -> Vec<String> {
-    let active: Vec<bool> = checks.iter().map(|(_, check)| check.is_active()).collect();
-    let keep = exclusive_after_toggle(&active, toggled);
-    let all_on = keep.is_empty();
-    if checks[0].1.is_active() != all_on {
-        checks[0].1.set_active(all_on);
+/// Whether a folder checklist row matches the overlay search box.
+fn folder_matches_query(folder: &str, query: &str) -> bool {
+    let q = query.trim().to_lowercase();
+    q.is_empty() || folder_label(folder).to_lowercase().contains(&q)
+}
+
+/// Check states and full selection after a toggle.
+///
+/// `visible_ids[0]` is always `None` (the All row). `hidden_selected` are checked ids
+/// the search filter is hiding. Checking All clears those too. Unchecking the last
+/// visible item keeps All off while any hidden selection remains.
+fn exclusive_selection_after_toggle(
+    active: &[bool],
+    toggled: usize,
+    visible_ids: &[Option<String>],
+    hidden_selected: &[String],
+) -> (Vec<bool>, Vec<String>) {
+    if active.is_empty() || toggled >= active.len() || visible_ids.len() != active.len() {
+        return (active.to_vec(), hidden_selected.to_vec());
     }
-    for index in 1..checks.len() {
-        let on = keep.contains(&index);
-        if checks[index].1.is_active() != on {
-            checks[index].1.set_active(on);
+    let mut on = active.to_vec();
+    if toggled == 0 {
+        if on[0] {
+            for flag in &mut on[1..] {
+                *flag = false;
+            }
+        } else {
+            on[0] = true;
+        }
+        return (on, Vec::new());
+    }
+    if on[toggled] {
+        on[0] = false;
+    } else if !on[1..].iter().any(|flag| *flag) && hidden_selected.is_empty() {
+        on[0] = true;
+    }
+    if on[0] {
+        return (on, Vec::new());
+    }
+    let mut next = hidden_selected.to_vec();
+    for (index, flag) in on.iter().enumerate().skip(1) {
+        if !*flag {
+            continue;
+        }
+        let Some(id) = visible_ids[index].clone() else {
+            continue;
+        };
+        if !next.contains(&id) {
+            next.push(id);
         }
     }
-    keep.into_iter()
-        .filter_map(|index| checks[index].0.clone())
-        .collect()
+    (on, next)
+}
+
+/// Writes the exclusive toggle result onto the checks and returns the full selection.
+fn apply_exclusive_toggle(
+    checks: &[(Option<String>, CheckButton)],
+    toggled: usize,
+    hidden_selected: &[String],
+) -> Vec<String> {
+    let active: Vec<bool> = checks.iter().map(|(_, check)| check.is_active()).collect();
+    let visible_ids: Vec<Option<String>> = checks.iter().map(|(id, _)| id.clone()).collect();
+    let (on, selected) =
+        exclusive_selection_after_toggle(&active, toggled, &visible_ids, hidden_selected);
+    for (index, flag) in on.iter().enumerate() {
+        if checks[index].1.is_active() != *flag {
+            checks[index].1.set_active(*flag);
+        }
+    }
+    selected
 }
 
 fn check_row(title: &str, check: &CheckButton) -> ActionRow {
@@ -1035,13 +1146,32 @@ fn check_row(title: &str, check: &CheckButton) -> ActionRow {
     row
 }
 
-/// Replaces the expander's rows with an exclusive "all" row plus one check per item.
+/// Sidebar row that opens a checklist overlay. The subtitle shows the current selection.
+fn checklist_trigger_row(title: &str, tooltip: &str, subtitle: &str) -> (ActionRow, Button) {
+    let open = Button::builder()
+        .icon_name("go-next-symbolic")
+        .tooltip_text(tooltip)
+        .valign(Align::Center)
+        .css_classes(["flat"])
+        .build();
+    let row = ActionRow::builder()
+        .title(title)
+        .subtitle(subtitle)
+        .tooltip_text(tooltip)
+        .activatable_widget(&open)
+        .build();
+    row.add_suffix(&open);
+    (row, open)
+}
+
+/// Replaces the list rows with an exclusive "all" row plus one check per item.
 ///
-/// `selected` lists item ids. An empty `selected` checks the all-row. Checking an item
-/// clears the all-row. Checking the all-row clears the items. Unchecking the last item
-/// checks the all-row again.
+/// `selected` is the full selection, including ids that the search filter hides.
+/// An empty `selected` checks the all-row. Checking an item clears the all-row.
+/// Checking the all-row clears every selected id. Unchecking the last visible item
+/// checks the all-row only when nothing stays selected outside the filter.
 fn install_exclusive_checks(
-    expander: &ExpanderRow,
+    list: &PreferencesGroup,
     stored_rows: &Rc<RefCell<Vec<ActionRow>>>,
     all_label: &str,
     items: &[(String, String)],
@@ -1051,28 +1181,32 @@ fn install_exclusive_checks(
 ) {
     rebuilding.set(true);
     for row in stored_rows.borrow_mut().drain(..) {
-        expander.remove(&row);
+        list.remove(&row);
     }
 
-    let any = items
-        .iter()
-        .any(|(id, _)| selected.iter().any(|picked| picked == id));
+    let hidden: Rc<Vec<String>> = Rc::new(
+        selected
+            .iter()
+            .filter(|id| !items.iter().any(|(visible, _)| visible == *id))
+            .cloned()
+            .collect(),
+    );
     let mut checks: Vec<(Option<String>, CheckButton)> = Vec::new();
     let mut ui_rows = Vec::new();
 
     let all_check = CheckButton::new();
-    all_check.set_active(!any);
+    all_check.set_active(selected.is_empty());
     checks.push((None, all_check.clone()));
     let all_row = check_row(all_label, &all_check);
-    expander.add_row(&all_row);
+    list.add(&all_row);
     ui_rows.push(all_row);
 
     for (id, label) in items {
         let check = CheckButton::new();
-        check.set_active(any && selected.iter().any(|picked| picked == id));
+        check.set_active(selected.iter().any(|picked| picked == id));
         checks.push((Some(id.clone()), check.clone()));
         let row = check_row(label, &check);
-        expander.add_row(&row);
+        list.add(&row);
         ui_rows.push(row);
     }
     *stored_rows.borrow_mut() = ui_rows;
@@ -1081,6 +1215,7 @@ fn install_exclusive_checks(
     for idx in 0..checks.len() {
         let check = checks[idx].1.clone();
         let checks = Rc::clone(&checks);
+        let hidden = Rc::clone(&hidden);
         let rebuilding = rebuilding.clone();
         let on_change = Rc::clone(&on_change);
         check.connect_toggled(move |_| {
@@ -1088,7 +1223,7 @@ fn install_exclusive_checks(
                 return;
             }
             rebuilding.set(true);
-            let selected = apply_exclusive_toggle(&checks, idx);
+            let selected = apply_exclusive_toggle(&checks, idx, &hidden);
             rebuilding.set(false);
             on_change(selected);
         });
@@ -1167,5 +1302,39 @@ mod tests {
             exclusive_after_toggle(&[false, false], 0),
             Vec::<usize>::new()
         );
+    }
+
+    #[test]
+    fn folder_search_matches_label_case_insensitively() {
+        assert!(folder_matches_query("cats", ""));
+        assert!(folder_matches_query("cats", "  CAT "));
+        assert!(folder_matches_query("", "root"));
+        assert!(!folder_matches_query("cats", "dog"));
+    }
+
+    #[test]
+    fn filtered_toggle_keeps_hidden_selection() {
+        let ids = [None, Some("dogs".into())];
+        let (on, next) =
+            exclusive_selection_after_toggle(&[false, true], 1, &ids, &["cats".into()]);
+        assert_eq!(on, vec![false, true]);
+        assert_eq!(next, vec!["cats".to_owned(), "dogs".to_owned()]);
+    }
+
+    #[test]
+    fn filtered_all_clears_hidden_selection() {
+        let ids = [None, Some("dogs".into())];
+        let (on, next) = exclusive_selection_after_toggle(&[true, true], 0, &ids, &["cats".into()]);
+        assert_eq!(on, vec![true, false]);
+        assert!(next.is_empty());
+    }
+
+    #[test]
+    fn unchecking_last_visible_keeps_hidden_without_all() {
+        let ids = [None, Some("dogs".into())];
+        let (on, next) =
+            exclusive_selection_after_toggle(&[false, false], 1, &ids, &["cats".into()]);
+        assert_eq!(on, vec![false, false]);
+        assert_eq!(next, vec!["cats".to_owned()]);
     }
 }

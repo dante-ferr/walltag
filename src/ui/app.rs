@@ -13,17 +13,17 @@ use gtk4::{
 };
 use libadwaita::prelude::*;
 use libadwaita::{
-    Application, ApplicationWindow, Dialog, EntryRow, ExpanderRow, HeaderBar, SpinRow,
-    StyleManager, ToastOverlay, ToolbarView,
+    Application, ApplicationWindow, Dialog, EntryRow, HeaderBar, SpinRow, StyleManager,
+    ToastOverlay, ToolbarView,
 };
 
 use crate::config::{sidebar_limits, ConfigPaths};
 use crate::metadata::MetadataStore;
 use crate::scan::scan_wallpapers;
 use crate::ui::gallery::{default_app_css, wire_activate, GalleryModel, GalleryView};
-use crate::ui::overlay::overlay_css;
 use crate::ui::gui_scale::{install_scale_provider, wire_gui_scale};
 use crate::ui::masonry::{MasonryGrid, MAX_ZOOM, MIN_ZOOM};
+use crate::ui::overlay::overlay_css;
 use crate::ui::sidebar::Sidebar;
 use crate::ui::theming::load_custom_css;
 use crate::{AppConfig, Cli};
@@ -395,8 +395,8 @@ fn is_inside(widget: &Widget, ancestor: &Widget) -> bool {
     widget == ancestor || widget.is_ancestor(ancestor)
 }
 
-/// Whether a press on `target` belongs to a control (button, entry, row, expander,
-/// scrollbar, popover, or the sidebar divider) instead of blank space.
+/// Whether a press on `target` belongs to a control (button, entry, row, scrollbar,
+/// popover, dialog, or the sidebar divider) instead of blank space.
 fn is_interactive(target: &Widget) -> bool {
     if target.is::<Paned>() {
         // The only part of the `Paned` itself that can be hit is its divider.
@@ -416,7 +416,6 @@ fn is_interactive(target: &Widget) -> bool {
             || w.is::<Dialog>()
             || w.is::<EntryRow>()
             || w.is::<SpinRow>()
-            || w.is::<ExpanderRow>()
             || w.downcast_ref::<ListBoxRow>()
                 .is_some_and(|row| row.is_activatable());
         if control {
