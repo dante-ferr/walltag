@@ -751,12 +751,13 @@ pub fn default_app_css() -> &'static str {
       min-width: 0;
       padding: 0.143em;
     }
-    /* Dropdown rows: the selected value and arrow never get a hover chip. */
-    row.combo > box.header > box.suffixes listview,
-    row.combo > box.header > box.suffixes listview > row,
-    row.combo > box.header > box.suffixes listview > row:hover,
-    row.combo > box.header > box.suffixes listview > row:active,
-    row.combo > box.header > box.suffixes listview > row:focus {
+    /* Closed combo value: the inline list, not the menu, never gets a hover chip.
+       The menu listview is also under box.suffixes, so this must stay on .inline. */
+    row.combo > box.header > box.suffixes listview.inline,
+    row.combo > box.header > box.suffixes listview.inline > row,
+    row.combo > box.header > box.suffixes listview.inline > row:hover,
+    row.combo > box.header > box.suffixes listview.inline > row:active,
+    row.combo > box.header > box.suffixes listview.inline > row:focus {
       background: none;
       background-color: transparent;
       box-shadow: none;
@@ -815,7 +816,11 @@ pub fn default_app_css() -> &'static str {
     }
     row.combo popover.menu > contents listview > row:hover,
     row.combo popover.menu > contents listview > row:selected {
-      background-color: alpha(currentColor, 0.1);
+      background-color: color-mix(in srgb, currentColor 10%, transparent);
+    }
+    row.combo popover.menu > contents listview > row:hover:selected,
+    row.combo popover.menu > contents listview > row:active {
+      background-color: color-mix(in srgb, currentColor 19%, transparent);
     }
     /* walltag-css-end */
     "#
