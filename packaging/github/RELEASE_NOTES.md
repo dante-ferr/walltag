@@ -1,21 +1,18 @@
-## Walltag 0.1.0
+## Walltag 0.1.2
 
-First public release of Walltag, a minimalist wallpaper manager and visual gallery for Linux on Wayland.
+### Fixes
 
-### Highlights
+- Load `custom_css` from memory and poll the file so Wallust theme updates apply while the app stays open
 
-- Masonry wallpaper gallery with zoom, smooth scrolling, and folder/tag grouping
-- Tag editing with multi-select
-- `swww` and `awww` backends
-- `--restore` for compositor autostart (optional `--no-post-command`)
-- Configurable `post_command` after a successful set
-- Settings persisted under `~/.config/walltag/config.json`
+### Packaging
+
+- Self-hosted Arch pacman repository on GitHub Pages (`pacman -Syu walltag` after one-time repo setup)
+- Release workflow automation for crates.io (when `CRATES_IO_TOKEN` is set) and pacman repo publishing
 
 ### Install
 
+- **Arch (pacman repo):** see https://dante-ferr.github.io/walltag/
 - **crates.io:** `cargo install walltag`
-- **Flatpak:** see `packaging/flatpak/` (Flathub submission after review)
-- **AUR:** packaging is ready in `packaging/aur/` (upload when AUR registration reopens)
 - **Source:** build with Rust 1.75+, GTK 4, and Libadwaita
 
 ### Requirements
