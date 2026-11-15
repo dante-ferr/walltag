@@ -56,6 +56,8 @@ Example:
 
 `post_command` runs through `sh -c` after a successful set. It expands `$wallpaper` (image path) and `$monitor` (output name, or empty when applying to all monitors). Leave it empty to skip the hook.
 
+Set `custom_css` to a GTK CSS file path to override Libadwaita colors. Walltag reloads that file when it changes. Leave it unset to keep the built-in stylesheet.
+
 Tag metadata lives at `{wallpaper_root}/.walltag/metadata.json`. Last wallpaper state lives at `{wallpaper_root}/.walltag/state.json`.
 
 ## Run
