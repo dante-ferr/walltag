@@ -2,7 +2,9 @@
 
 Tagging `v*` runs [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 That workflow creates the GitHub Release and, when secrets are configured,
-publishes to crates.io and opens a Flathub update PR.
+publishes to crates.io. Flathub update PRs run only if `FLATHUB_TOKEN` is set
+(optional; skip Flathub entirely if you distribute via crates.io or a
+self-hosted Flatpak/pacman repo instead).
 
 ## Before every tag
 
