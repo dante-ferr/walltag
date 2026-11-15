@@ -26,15 +26,31 @@ System packages (AUR, Flatpak) already ship those files under `/usr/share`.
 
 Packaging lives in [`packaging/flatpak/`](packaging/flatpak/). Build locally with `flatpak-builder`, or install from Flathub after the submission is accepted. The Flatpak needs host access so it can run `swww` / `awww` and your `post_command`. Release automation (crates.io + Flathub) is documented in [`packaging/RELEASE.md`](packaging/RELEASE.md).
 
-### Arch Linux (AUR)
+### Arch Linux (pacman repo)
 
-Packaging lives in [`packaging/aur/`](packaging/aur/). Upload when AUR account registration reopens. See [packaging/aur/README.md](packaging/aur/README.md).
+Binary packages publish to GitHub Pages on every release tag. After a one-time repo setup, updates install with `pacman -Syu`:
 
 ```bash
-git clone https://aur.archlinux.org/walltag.git
-cd walltag
-makepkg -si
+curl -fsSL https://dante-ferr.github.io/walltag/walltag.conf | sudo tee /etc/pacman.d/walltag
 ```
+
+Add this line to `/etc/pacman.conf` (near other `Include` lines):
+
+```text
+Include = /etc/pacman.d/walltag
+```
+
+Then:
+
+```bash
+sudo pacman -Syu walltag
+```
+
+Details: [`packaging/pacman/README.md`](packaging/pacman/README.md).
+
+### Arch Linux (AUR)
+
+Packaging also lives in [`packaging/aur/`](packaging/aur/) for when AUR account registration reopens. See [packaging/aur/README.md](packaging/aur/README.md).
 
 ## Configuration
 

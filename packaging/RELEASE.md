@@ -35,9 +35,20 @@ self-hosted Flatpak/pacman repo instead).
 | Step | Secret | Behavior when missing |
 | --- | --- | --- |
 | GitHub Release | (none; uses `GITHUB_TOKEN`) | Always runs |
+| Pacman repo (`gh-pages`) | (none; uses `GITHUB_TOKEN`) | Always runs via `.github/workflows/pacman-repo.yml` |
 | `cargo publish --locked` | `CRATES_IO_TOKEN` | Skips with a notice and prints setup steps |
 | Check / regenerate `cargo-sources.json` | (none) | Always runs; warns if the committed file is stale |
 | Flathub update PR | `FLATHUB_TOKEN` | Skips with a notice and prints manual git steps |
+
+### Pacman repository
+
+Tagging `v*` (or running **Actions → Pacman repo → Run workflow**) builds the
+Arch package and publishes it to the `gh-pages` branch:
+
+`https://dante-ferr.github.io/walltag/`
+
+Users install with the steps in `packaging/pacman/README.md`. Enable GitHub
+Pages once if the API call in CI cannot (Settings → Pages → branch `gh-pages`).
 
 ## One-time secrets (GitHub → Settings → Secrets and variables → Actions)
 

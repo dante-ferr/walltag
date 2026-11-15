@@ -18,6 +18,8 @@ sha256sums=('c3a5f09562e963dc04dfc6a3971425acc7d59dcaea57a20ab2f03907d85cee7f')
 
 build() {
   cd "$pkgname-$pkgver"
+  # Ensure artifacts land in ./target even if the environment sets CARGO_TARGET_DIR.
+  unset CARGO_TARGET_DIR
   cargo build --release --locked
 }
 
