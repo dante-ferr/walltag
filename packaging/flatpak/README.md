@@ -56,18 +56,10 @@ Docs: https://docs.flathub.org/docs/for-app-authors/submission
 
 ## Shipping a new version (after Flathub accepts the app)
 
-This upstream repo does **not** auto-publish Flatpak or crates.io. Tagging
-`v*` only creates a **GitHub Release** (see `.github/workflows/release.yml`).
+Tagging `v*` runs [`.github/workflows/release.yml`](../../.github/workflows/release.yml):
+GitHub Release always; crates.io and a Flathub update PR when
+`CRATES_IO_TOKEN` / `FLATHUB_TOKEN` are set.
 
-For each new version:
-
-1. Bump `version` in `Cargo.toml` and the `<release>` entry in
-   `assets/io.github.dante_ferr.Walltag.metainfo.xml`.
-2. If `Cargo.lock` changed, run `./packaging/flatpak/generate-cargo-sources.sh`.
-3. Commit, tag `vX.Y.Z`, push branch + tag (GitHub Release is automatic).
-4. `cargo publish` (manual; needs crates.io token).
-5. In the **Flathub app repo** (`flathub/io.github.dante_ferr.Walltag`), update
-   `tag` / `commit` in the manifest, copy the new `cargo-sources.json`, commit,
-   and push. Flathub builds and publishes from that repo.
-6. When AUR is available: bump `pkgver` / checksums in `packaging/aur/` and push
-   the AUR git repo.
+Before each tag: regenerate `cargo-sources.json` if `Cargo.lock` changed, then
+follow the checklist in [`packaging/RELEASE.md`](../RELEASE.md). First Flathub
+submission and AUR remain manual (documented there).
