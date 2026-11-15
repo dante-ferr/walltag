@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gtk4::gdk::Display;
+use gtk4::prelude::*;
 use gtk4::{CssProvider, STYLE_PROVIDER_PRIORITY_USER};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -28,13 +29,32 @@ fn apply_css_file(
     // load_from_path keeps a file monitor on the GTK thread. Read the sheet
     // and parse it in memory so the first frame is not stalled.
     let css = std::fs::read_to_string(css_path)?;
-    let provider = CssProvider::new();
-    provider.load_from_string(&css);
-    if let Some(old) = provider_slot.borrow_mut().take() {
-        gtk4::style_context_remove_provider_for_display(display, &old);
+    // Keep one provider and replace its contents so GTK restyles in place.
+    // Drop the RefCell borrow before borrow_mut; an if-let on borrow().as_ref()
+    // can keep the guard alive across the else branch.
+    let installed = provider_slot.borrow().is_some();
+    if installed {
+        provider_slot
+            .borrow()
+            .as_ref()
+            .expect("custom css provider")
+            .load_from_string(&css);
+    } else {
+        let provider = CssProvider::new();
+        provider.load_from_string(&css);
+        gtk4::style_context_add_provider_for_display(
+            display,
+            &provider,
+            STYLE_PROVIDER_PRIORITY_USER,
+        );
+        *provider_slot.borrow_mut() = Some(provider);
     }
-    gtk4::style_context_add_provider_for_display(display, &provider, STYLE_PROVIDER_PRIORITY_USER);
-    *provider_slot.borrow_mut() = Some(provider);
+    for widget in gtk4::Window::list_toplevels() {
+        // Toggle a class so style contexts recompute CSS variables.
+        widget.add_css_class("walltag-palette-tick");
+        widget.remove_css_class("walltag-palette-tick");
+        widget.queue_draw();
+    }
     tracing::info!("Loaded custom CSS from {}", css_path.display());
     Ok(())
 }
