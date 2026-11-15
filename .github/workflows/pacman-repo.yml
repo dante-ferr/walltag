@@ -72,6 +72,7 @@ jobs:
       - name: Publish gh-pages pacman repo
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           work="$(mktemp -d)"

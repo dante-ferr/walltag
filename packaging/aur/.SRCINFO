@@ -1,13 +1,12 @@
 pkgbase = walltag
 	pkgdesc = Minimalist wallpaper manager and visual gallery for Linux/Wayland
 	pkgver = 0.1.2
-	pkgrel = 1
+	pkgrel = 2
 	url = https://github.com/dante-ferr/walltag
 	arch = x86_64
 	arch = aarch64
 	license = MIT
-	makedepends = cargo
-	makedepends = rustc
+	makedepends = rust
 	makedepends = git
 	depends = gtk4
 	depends = libadwaita
