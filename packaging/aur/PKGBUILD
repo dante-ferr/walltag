@@ -1,13 +1,13 @@
 # Maintainer: Dante Ferreira <https://github.com/dante-ferr>
 pkgname=walltag
 pkgver=0.1.2
-pkgrel=1
+pkgrel=2
 pkgdesc="Minimalist wallpaper manager and visual gallery for Linux/Wayland"
 arch=('x86_64' 'aarch64')
 url="https://github.com/dante-ferr/walltag"
 license=('MIT')
 depends=('gtk4' 'libadwaita' 'gcc-libs')
-makedepends=('cargo' 'rustc' 'git')
+makedepends=('rust' 'git')
 optdepends=(
   'swww: swww wallpaper backend'
   'awww: awww wallpaper backend'
